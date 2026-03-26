@@ -2,6 +2,8 @@
 openai>=1.0.0
 anthropic>=0.18.0
 mcp>=0.1.0
+langchain-core>=0.1.0
+langchain-deepseek>=0.1.0
 
 # Video processing
 opencv-python>=4.8.0
