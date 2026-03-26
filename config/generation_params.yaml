@@ -1,0 +1,30 @@
+# AI-TV-Studio Generation Parameters
+
+# Shot generation defaults
+shot:
+  min_duration: 5           # seconds
+  max_duration: 12          # seconds
+  default_duration: 8       # seconds
+  default_lighting: "cinematic lighting"
+
+# Character entry stitching
+stitching:
+  default_entry_duration: 8
+  default_entry_style: "walk_in"
+  default_entry_direction: "left"
+  default_reaction: "notice"
+  default_intermediate_steps: 0
+  max_intermediate_steps: 3
+
+# Video assembly
+assembly:
+  crossfade_duration: 0.5   # seconds
+  output_codec: libx264
+  output_crf: 18
+  output_preset: fast
+
+# FFmpeg settings
+ffmpeg:
+  binary: ffmpeg
+  ffprobe_binary: ffprobe
+  thread_count: 4
