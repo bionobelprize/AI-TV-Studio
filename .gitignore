@@ -21,7 +21,6 @@ env/
 
 # Secrets and credentials
 config/video_api_keys.yaml
-src/model_load.py
 *.pem
 *.key
 *.p12
