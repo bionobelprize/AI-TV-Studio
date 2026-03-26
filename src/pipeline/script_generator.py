@@ -8,12 +8,45 @@ shot planning and video generation.
 import json
 import uuid
 from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
 
 from src.models.character import Character, CharacterEmotion, CharacterVisualCore
 from src.models.episode import Episode
 from src.models.scene import Scene
 from src.models.shot import CameraMotion, GenerationMode, Shot
 import src.model_load as model_load
+
+
+class ShotOutput(BaseModel):
+    sequence_number: int = Field(default=1)
+    action_description: str = Field(default="")
+    dialogue: Optional[str] = Field(default=None)
+    characters_in_shot: List[str] = Field(default_factory=list)
+    character_emotions: Dict[str, str] = Field(default_factory=dict)
+    duration: int = Field(default=8)
+    camera_motion: Dict[str, Any] = Field(default_factory=lambda: {"type": "static"})
+    lighting_description: str = Field(default="cinematic lighting")
+    text_prompt: str = Field(default="")
+
+
+class SceneOutput(BaseModel):
+    scene_number: int = Field(default=1)
+    location: str = Field(default="Unknown")
+    time_of_day: str = Field(default="day")
+    weather: str = Field(default="clear")
+    mood: str = Field(default="neutral")
+    bgm_mood: str = Field(default="neutral")
+    bgm_tempo: str = Field(default="moderate")
+    ambient_sounds: List[str] = Field(default_factory=list)
+    shots: List[ShotOutput] = Field(default_factory=list)
+
+
+class EpisodeScriptOutput(BaseModel):
+    episode_title: str = Field(default="")
+    logline: str = Field(default="")
+    scenes: List[SceneOutput] = Field(default_factory=list)
 
 
 class ScriptGenerator:
@@ -28,8 +61,29 @@ class ScriptGenerator:
         "You are an expert television screenwriter and cinematographer. "
         "Generate structured episode scripts as valid JSON following the "
         "provided schema exactly. Focus on cinematic storytelling with "
-        "clear shot descriptions, character emotions, and camera directions."
+        "clear shot descriptions, character emotions, and camera directions. "
+        "Every shot must be visual and production-ready for text-to-video generation."
     )
+
+    SCRIPT_PROMPT_TEMPLATE = """You are writing Episode {episode_number} of a TV series.
+
+Series Title: {series_title}
+Genre: {genre}
+Characters:
+{characters_desc}
+
+Episode Outline:
+{episode_outline}
+
+Please produce a complete cinematic episode plan with:
+1. A compelling episode title and concise logline
+2. Multiple coherent scenes with clear progression
+3. Shot-by-shot visual storytelling in each scene
+4. Character emotions aligned with each shot
+5. Practical camera motion and strong text prompts for generation
+
+Output must be in JSON format as specified below.
+{format_instructions}"""
 
     def __init__(self, llm_client=None, model: str = "deepseek-chat"):
         """Initialize the script generator.
@@ -44,6 +98,19 @@ class ScriptGenerator:
         else:
             self.llm = model_load.load()
         self.model = model
+        self.parser = JsonOutputParser(pydantic_object=EpisodeScriptOutput)
+        self.prompt = PromptTemplate(
+            template=self.SCRIPT_PROMPT_TEMPLATE,
+            input_variables=[
+                "series_title",
+                "genre",
+                "characters_desc",
+                "episode_outline",
+                "episode_number",
+            ],
+            partial_variables={"format_instructions": self.parser.get_format_instructions()},
+        )
+        self.chain = self.prompt | self.llm | self.parser
 
     def generate_episode(
         self,
@@ -62,84 +129,45 @@ class ScriptGenerator:
         Returns:
             A fully structured Episode ready for shot planning.
         """
-        prompt = self._build_prompt(series_config, episode_outline, episode_number)
-        raw_response = self._call_llm(prompt)
-        script_data = self._parse_response(raw_response)
+        script_data = self._call_llm(series_config, episode_outline, episode_number)
         return self._build_episode(script_data, series_config, episode_number)
 
-    def _build_prompt(
+    def _call_llm(
         self,
         series_config: Dict[str, Any],
         episode_outline: str,
         episode_number: int,
-    ) -> str:
-        """Construct the prompt sent to the LLM.
+    ) -> Dict[str, Any]:
+        """Send prompt through the LangChain structured-output pipeline.
 
         Args:
-            series_config: Series metadata and character list.
-            episode_outline: High-level story outline for the episode.
+            series_config: Series metadata and character definitions.
+            episode_outline: High-level story outline.
             episode_number: Episode number.
 
         Returns:
-            The full prompt string.
+            Parsed JSON dictionary representing the generated episode script.
         """
-        characters_desc = json.dumps(
-            series_config.get("characters", []), indent=2
-        )
-        return (
-            f"Series: {series_config.get('title', 'Untitled')}\n"
-            f"Genre: {series_config.get('genre', 'drama')}\n"
-            f"Characters:\n{characters_desc}\n\n"
-            f"Episode {episode_number} Outline:\n{episode_outline}\n\n"
-            "Generate a structured JSON episode script with the following format:\n"
-            "{\n"
-            '  "episode_title": "...",\n'
-            '  "logline": "...",\n'
-            '  "scenes": [\n'
-            "    {\n"
-            '      "scene_number": 1,\n'
-            '      "location": "...",\n'
-            '      "time_of_day": "day",\n'
-            '      "weather": "clear",\n'
-            '      "mood": "tense",\n'
-            '      "bgm_mood": "suspenseful",\n'
-            '      "bgm_tempo": "moderate",\n'
-            '      "ambient_sounds": ["city noise"],\n'
-            '      "shots": [\n'
-            "        {\n"
-            '          "sequence_number": 1,\n'
-            '          "action_description": "...",\n'
-            '          "dialogue": "...",\n'
-            '          "characters_in_shot": ["char_id"],\n'
-            '          "character_emotions": {"char_id": "neutral"},\n'
-            '          "duration": 8,\n'
-            '          "camera_motion": {"type": "static"},\n'
-            '          "lighting_description": "cinematic lighting",\n'
-            '          "text_prompt": "..."\n'
-            "        }\n"
-            "      ]\n"
-            "    }\n"
-            "  ]\n"
-            "}"
+        characters_desc = json.dumps(series_config.get("characters", []), indent=2)
+        input_dict = {
+            "series_title": series_config.get("title", "Untitled"),
+            "genre": series_config.get("genre", "drama"),
+            "characters_desc": characters_desc,
+            "episode_outline": episode_outline,
+            "episode_number": episode_number,
+        }
+        # Prepend system instruction to keep output quality consistent.
+        input_dict["episode_outline"] = (
+            f"{self.SYSTEM_PROMPT}\n\n{input_dict['episode_outline']}"
         )
 
-    def _call_llm(self, prompt: str) -> str:
-        """Send prompt to the LLM and return the raw text response.
-
-        Args:
-            prompt: The user prompt to send.
-
-        Returns:
-            Raw response string from the LLM.
-        """
-        full_prompt = (
-            f"{self.SYSTEM_PROMPT}\n\n"
-            f"{prompt}\n\n"
-            "Return only valid JSON without markdown fences or extra text."
-        )
-        # Keep invocation style aligned with reference_code tooling.
-        response = self.llm.invoke(full_prompt)
-        return self._extract_text_from_response(response)
+        try:
+            return self.chain.invoke(input_dict)
+        except Exception:
+            fallback_prompt = self.prompt.format(**input_dict)
+            response = self.llm.invoke(fallback_prompt)
+            raw_text = self._extract_text_from_response(response)
+            return self._parse_response(raw_text)
 
     def _extract_text_from_response(self, response: Any) -> str:
         """Normalize different LLM response object types to plain text."""
