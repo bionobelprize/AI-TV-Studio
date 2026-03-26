@@ -13,6 +13,7 @@ from src.models.character import Character, CharacterEmotion, CharacterVisualCor
 from src.models.episode import Episode
 from src.models.scene import Scene
 from src.models.shot import CameraMotion, GenerationMode, Shot
+import src.model_load as model_load
 
 
 class ScriptGenerator:
@@ -30,14 +31,18 @@ class ScriptGenerator:
         "clear shot descriptions, character emotions, and camera directions."
     )
 
-    def __init__(self, llm_client, model: str = "gpt-4"):
+    def __init__(self, llm_client=None, model: str = "deepseek-chat"):
         """Initialize the script generator.
 
         Args:
-            llm_client: An LLM client with a ``chat`` / ``complete`` interface.
+            llm_client: Optional custom LLM client. If omitted, loads default
+                reference model from ``model_load``.
             model: Model identifier to use for generation.
         """
-        self.llm = llm_client
+        if llm_client is not None:
+            self.llm = llm_client
+        else:
+            self.llm = model_load.load()
         self.model = model
 
     def generate_episode(
@@ -127,14 +132,36 @@ class ScriptGenerator:
         Returns:
             Raw response string from the LLM.
         """
-        response = self.llm.chat(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
+        full_prompt = (
+            f"{self.SYSTEM_PROMPT}\n\n"
+            f"{prompt}\n\n"
+            "Return only valid JSON without markdown fences or extra text."
         )
-        return response
+        # Keep invocation style aligned with reference_code tooling.
+        response = self.llm.invoke(full_prompt)
+        return self._extract_text_from_response(response)
+
+    def _extract_text_from_response(self, response: Any) -> str:
+        """Normalize different LLM response object types to plain text."""
+        if isinstance(response, str):
+            return response
+
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if text:
+                        parts.append(str(text))
+                elif hasattr(item, "text") and getattr(item, "text"):
+                    parts.append(str(getattr(item, "text")))
+            if parts:
+                return "\n".join(parts)
+
+        return str(response)
 
     def _parse_response(self, raw_response: str) -> Dict[str, Any]:
         """Parse the LLM response into a structured dictionary.
@@ -152,10 +179,10 @@ class ScriptGenerator:
             ValueError: If valid JSON cannot be extracted.
         """
         text = raw_response.strip()
-        if "```" in text:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            text = text[start:end]
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:

@@ -11,6 +11,7 @@ class GenerationMode(str, Enum):
     """Video generation mode for a shot."""
 
     TEXT_TO_VIDEO = "txt2video"
+    FIRST_FRAME = "first_frame"
     FIRSTLAST_FRAME = "firstlast_frame"
     REFERENCE_TO_VIDEO = "ref2video"
 
@@ -56,6 +57,7 @@ class Shot:
 
     # Output
     generated_video_path: Optional[str] = None
+    generation_error: Optional[str] = None
 
     # Continuity tracking
     previous_shot_tail: Optional[str] = None  # path to last frame of previous shot

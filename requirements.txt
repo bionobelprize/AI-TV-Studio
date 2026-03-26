@@ -24,3 +24,5 @@ pydantic>=2.0.0
 # Utilities
 python-dotenv>=1.0.0
 loguru>=0.7.0
+PyYAML>=6.0.0
+volcengine-python-sdk[ark]>=1.0.0

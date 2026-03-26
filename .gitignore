@@ -16,6 +16,21 @@ build/
 venv/
 env/
 .env
+.env.*
+!.env.example
+
+# Secrets and credentials
+config/video_api_keys.yaml
+src/model_load.py
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_ed25519
+secrets.yaml
+secrets.yml
 
 # IDE
 .vscode/
@@ -30,8 +45,10 @@ htmlcov/
 .tox/
 
 # Data directories (generated content)
-data/generated/
-data/output/
+generated/
+outputs/
+reference_code/
+
 
 # OS
 .DS_Store

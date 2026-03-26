@@ -92,6 +92,10 @@ def validate_shot(shot: Shot) -> List[str]:
                 "FIRSTLAST_FRAME shots require 'end_frame_path'."
             )
 
+    if shot.generation_mode == GenerationMode.FIRST_FRAME:
+        if not shot.start_frame_path:
+            errors.append("FIRST_FRAME shots require 'start_frame_path'.")
+
     return errors
 
 

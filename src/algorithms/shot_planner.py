@@ -152,6 +152,9 @@ class ShotPlanner:
         if shot.generation_mode == GenerationMode.FIRSTLAST_FRAME:
             return shot.generation_mode
 
+        if shot.start_frame_path and not shot.end_frame_path:
+            return GenerationMode.FIRST_FRAME
+
         if shot.reference_images or (
             shot.characters_in_shot and has_preceding_shot
         ):

@@ -6,6 +6,7 @@ professional-grade output.
 """
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,15 @@ class VideoAssembler:
         for scene in episode.scenes:
             all_shots.extend(scene.shots)
 
+        generated_paths = [shot.generated_video_path for shot in all_shots if shot.generated_video_path]
+
+        if len(generated_paths) == 1:
+            output_path = str(
+                self.output_dir / f"episode_{episode.episode_number:02d}.mp4"
+            )
+            shutil.copy2(generated_paths[0], output_path)
+            return output_path
+
         segments: List[VideoSegment] = []
         for i, shot in enumerate(all_shots):
             if not shot.generated_video_path:
@@ -78,7 +88,10 @@ class VideoAssembler:
             segments.append(segment)
 
         if not segments:
-            raise ValueError("No generated video segments found for assembly.")
+            raise ValueError(
+                "No generated video segments found for assembly "
+                f"(shots_seen={len(all_shots)})."
+            )
 
         return self._ffmpeg_assemble(segments, episode)
 
@@ -108,6 +121,11 @@ class VideoAssembler:
                 check=True,
             )
             return float(result.stdout.strip())
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "ffprobe was not found in PATH. Install FFmpeg and ensure both "
+                "ffmpeg and ffprobe are available from the command line."
+            ) from exc
         except (subprocess.CalledProcessError, ValueError):
             return 0.0
 
@@ -131,12 +149,6 @@ class VideoAssembler:
         output_path = str(
             self.output_dir / f"episode_{episode.episode_number:02d}.mp4"
         )
-
-        if len(segments) == 1:
-            # Single segment — just copy it to the output location
-            import shutil
-            shutil.copy2(segments[0].path, output_path)
-            return output_path
 
         # Build FFmpeg concat filter with cross-fade transitions
         inputs: List[str] = []
@@ -194,7 +206,13 @@ class VideoAssembler:
             ]
         )
 
-        subprocess.run(["ffmpeg"] + cmd, check=True, capture_output=True)
+        try:
+            subprocess.run(["ffmpeg"] + cmd, check=True, capture_output=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "ffmpeg was not found in PATH. Install FFmpeg and ensure both "
+                "ffmpeg and ffprobe are available from the command line."
+            ) from exc
         return output_path
 
     def create_segment_list_file(

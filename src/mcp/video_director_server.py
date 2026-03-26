@@ -3,6 +3,7 @@
 Provides a Model Context Protocol (MCP) server that bridges the orchestration
 layer with external video and image generation APIs, exposing tools for:
 - Text-to-video generation
+- First-frame video generation
 - First-last frame video generation
 - Reference-to-video generation
 - Image generation with reference controls
@@ -23,6 +24,7 @@ class VideoDirectorServer:
 
     Supported generation modes:
     - ``txt2video``: Generate video from a text prompt alone.
+    - ``first_frame``: Generate video from a first frame and prompt.
     - ``firstlast_frame``: Interpolate video between a start and end frame.
     - ``ref2video``: Generate video guided by reference images.
     - ``txt2image``: Generate an image from a text prompt.
@@ -50,6 +52,7 @@ class VideoDirectorServer:
         return {
             "generate_text_to_video": self.generate_text_to_video,
             "generate_firstlast_frame_video": self.generate_firstlast_frame_video,
+            "generate_first_frame_video": self.generate_first_frame_video,
             "generate_reference_video": self.generate_reference_video,
             "generate_image": self.generate_image,
             "generate_reference_image": self.generate_reference_image,
@@ -104,7 +107,12 @@ class VideoDirectorServer:
             resolution=resolution,
         )
         path = output_path or result.get("path", "")
-        return {"path": path, "duration": duration, "mode": "txt2video"}
+        return {
+            **result,
+            "path": path,
+            "duration": duration,
+            "mode": "txt2video",
+        }
 
     def generate_firstlast_frame_video(
         self,
@@ -142,7 +150,49 @@ class VideoDirectorServer:
             duration=duration,
         )
         path = output_path or result.get("path", "")
-        return {"path": path, "duration": duration, "mode": "firstlast_frame"}
+        return {
+            **result,
+            "path": path,
+            "duration": duration,
+            "mode": "firstlast_frame",
+        }
+
+    def generate_first_frame_video(
+        self,
+        first_frame_path: str,
+        prompt: str = "",
+        duration: int = 8,
+        output_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate a video from a single first frame and prompt guidance.
+
+        Args:
+            first_frame_path: Path to the first frame image.
+            prompt: Optional text prompt guiding scene evolution.
+            duration: Desired video duration in seconds.
+            output_path: Optional path where the video will be saved.
+
+        Returns:
+            Dictionary with ``"path"``, ``"duration"``, and ``"mode"`` keys.
+        """
+        logger.debug(
+            "first_frame | frame=%s | duration=%ds",
+            first_frame_path,
+            duration,
+        )
+        result = self.api.generate_video(
+            mode="first_frame",
+            first_frame=first_frame_path,
+            prompt=prompt,
+            duration=duration,
+        )
+        path = output_path or result.get("path", "")
+        return {
+            **result,
+            "path": path,
+            "duration": duration,
+            "mode": "first_frame",
+        }
 
     def generate_reference_video(
         self,
@@ -175,7 +225,12 @@ class VideoDirectorServer:
             duration=duration,
         )
         path = output_path or result.get("path", "")
-        return {"path": path, "duration": duration, "mode": "ref2video"}
+        return {
+            **result,
+            "path": path,
+            "duration": duration,
+            "mode": "ref2video",
+        }
 
     def generate_image(
         self,
@@ -200,7 +255,7 @@ class VideoDirectorServer:
             resolution=resolution,
         )
         path = output_path or result.get("path", "")
-        return {"path": path, "mode": "txt2image"}
+        return {**result, "path": path, "mode": "txt2image"}
 
     def generate_reference_image(
         self,
@@ -239,7 +294,7 @@ class VideoDirectorServer:
             lighting_match=lighting_match,
         )
         path = output_path or result.get("path", "")
-        return {"path": path, "mode": "ref2image"}
+        return {**result, "path": path, "mode": "ref2image"}
 
     def list_tools(self) -> List[str]:
         """Return the names of all registered tools.

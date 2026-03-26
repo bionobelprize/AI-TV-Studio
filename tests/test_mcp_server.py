@@ -21,6 +21,7 @@ class TestVideoDirectorServer:
         tools = self.server.list_tools()
         assert "generate_text_to_video" in tools
         assert "generate_firstlast_frame_video" in tools
+        assert "generate_first_frame_video" in tools
         assert "generate_reference_video" in tools
         assert "generate_image" in tools
         assert "generate_reference_image" in tools
@@ -52,6 +53,18 @@ class TestVideoDirectorServer:
         assert call_kwargs["mode"] == "firstlast_frame"
         assert call_kwargs["start_frame"] == "/frames/start.png"
         assert call_kwargs["end_frame"] == "/frames/end.png"
+
+    def test_generate_first_frame_video(self):
+        result = self.server.generate_first_frame_video(
+            first_frame_path="/frames/first.png",
+            prompt="Camera slowly pulls back",
+            duration=7,
+        )
+        assert result["mode"] == "first_frame"
+        assert result["duration"] == 7
+        call_kwargs = self.server.api.generate_video.call_args.kwargs
+        assert call_kwargs["mode"] == "first_frame"
+        assert call_kwargs["first_frame"] == "/frames/first.png"
 
     def test_generate_reference_video(self):
         result = self.server.generate_reference_video(

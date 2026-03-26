@@ -183,6 +183,20 @@ class TestValidateShot:
         errors = validate_shot(shot)
         assert errors == []
 
+    def test_first_frame_requires_start_frame(self):
+        shot = _make_valid_shot()
+        shot.generation_mode = GenerationMode.FIRST_FRAME
+        shot.start_frame_path = None
+        errors = validate_shot(shot)
+        assert any("FIRST_FRAME" in e for e in errors)
+
+    def test_first_frame_valid_with_start_frame(self):
+        shot = _make_valid_shot()
+        shot.generation_mode = GenerationMode.FIRST_FRAME
+        shot.start_frame_path = "/frames/start.png"
+        errors = validate_shot(shot)
+        assert errors == []
+
 
 class TestValidateEpisode:
     def test_valid_episode_no_errors(self):

@@ -128,6 +128,7 @@ class TestShot:
 class TestGenerationMode:
     def test_values(self):
         assert GenerationMode.TEXT_TO_VIDEO == "txt2video"
+        assert GenerationMode.FIRST_FRAME == "first_frame"
         assert GenerationMode.FIRSTLAST_FRAME == "firstlast_frame"
         assert GenerationMode.REFERENCE_TO_VIDEO == "ref2video"
 

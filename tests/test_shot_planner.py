@@ -82,6 +82,15 @@ class TestShotPlannerGenerationMode:
             == GenerationMode.REFERENCE_TO_VIDEO
         )
 
+    def test_first_frame_when_only_start_frame_provided(self):
+        shot = _make_shot("s1", "sc1", 1)
+        shot.start_frame_path = "/img/first.png"
+        shot.end_frame_path = None
+        assert (
+            self.planner._select_generation_mode(shot, False)
+            == GenerationMode.FIRST_FRAME
+        )
+
 
 class TestShotPlannerTransitionInsertion:
     def setup_method(self):

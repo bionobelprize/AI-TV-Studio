@@ -187,6 +187,9 @@ class AITVStudio:
         """
         from src.models.shot import GenerationMode
 
+        failed_shots = []
+        successful_count = 0
+
         for scene in episode.scenes:
             for shot in scene.shots:
                 logger.info(
@@ -204,6 +207,13 @@ class AITVStudio:
                             prompt=shot.text_prompt,
                             duration=shot.duration,
                         )
+                    elif shot.generation_mode == GenerationMode.FIRST_FRAME:
+                        result = self._mcp_server.call_tool(
+                            "generate_first_frame_video",
+                            first_frame_path=shot.start_frame_path,
+                            prompt=shot.text_prompt,
+                            duration=shot.duration,
+                        )
                     elif shot.generation_mode == GenerationMode.REFERENCE_TO_VIDEO:
                         result = self._mcp_server.call_tool(
                             "generate_reference_video",
@@ -218,10 +228,22 @@ class AITVStudio:
                             duration=shot.duration,
                         )
                     shot.generated_video_path = result.get("path")
+                    shot.generation_error = None
+                    if shot.generated_video_path:
+                        successful_count += 1
                 except Exception as exc:
+                    shot.generation_error = str(exc)
+                    failed_shots.append((shot.id, str(exc)))
                     logger.warning(
                         "Failed to generate shot %s: %s", shot.id, exc
                     )
+
+        if successful_count == 0 and failed_shots:
+            first_shot_id, first_error = failed_shots[0]
+            raise RuntimeError(
+                "Shot generation failed for all shots. "
+                f"first_failed_shot={first_shot_id}; error={first_error}"
+            )
 
         episode.runtime_estimate = self._compute_runtime(episode)
         return episode
