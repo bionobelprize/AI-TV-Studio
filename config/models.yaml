@@ -1,0 +1,33 @@
+# AI-TV-Studio Model Configuration
+
+# LLM settings
+llm:
+  provider: openai
+  model: gpt-4
+  temperature: 0.8
+  max_tokens: 4096
+
+# Video generation model settings
+video:
+  provider: runway          # runway | pika | svd
+  default_duration: 8       # seconds (5-12)
+  resolution: "1280x720"
+  fps: 24
+
+# Image generation model settings
+image:
+  provider: stable_diffusion
+  model: sd3-medium
+  resolution: "1280x720"
+  steps: 30
+  cfg_scale: 7.5
+
+# ControlNet settings
+controlnet:
+  pose_model: "lllyasviel/ControlNet-v1-1"
+  depth_model: "lllyasviel/ControlNet-v1-1"
+
+# Character consistency settings
+consistency:
+  face_verification_threshold: 0.75
+  max_retries: 3
