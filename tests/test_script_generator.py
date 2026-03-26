@@ -10,15 +10,25 @@ from src.pipeline.script_generator import ScriptGenerator
 
 
 class DummyLLM:
-    """Simple LLM stub that records prompts and returns a fixed response."""
+    """Simple LLM stub that records prompts and returns a fixed response.
+
+    Compatible with LangChain chain composition (``prompt | llm | parser``)
+    because it implements ``__call__``, which LangChain wraps in a
+    ``RunnableLambda`` automatically.
+    """
 
     def __init__(self, response):
         self.response = response
         self.calls = []
 
-    def invoke(self, prompt: str):
-        self.calls.append(prompt)
+    def __call__(self, prompt):
+        to_str = getattr(prompt, "to_string", None)
+        prompt_str = to_str() if callable(to_str) else str(prompt)
+        self.calls.append(prompt_str)
         return self.response
+
+    def invoke(self, prompt):
+        return self(prompt)
 
 
 class ResponseObject:
@@ -104,7 +114,7 @@ class TestScriptGenerator:
         assert shot.character_emotions == {"char_lin": CharacterEmotion.NEUTRAL}
 
         assert len(llm.calls) == 1
-        assert "Return only valid JSON" in llm.calls[0]
+        assert "STRICT OUTPUT FORMAT" in llm.calls[0]
 
     def test_parse_response_accepts_markdown_wrapped_json(self):
         payload = self._valid_script_payload()
