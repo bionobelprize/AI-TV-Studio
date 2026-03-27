@@ -18,6 +18,7 @@ from src.models.episode import Episode
 from src.pipeline.asset_manager import AssetManager
 from src.pipeline.script_generator import ScriptGenerator
 from src.pipeline.video_assembler import VideoAssembler
+import src.model_load as model_load
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,7 @@ class AITVStudio:
     Example::
 
         studio = AITVStudio(config={
-            "llm_provider": "openai",
-            "llm_model": "gpt-4",
+            "llm_model": "deepseek-chat",
             "video_api": "runway",
             "output_dir": "./output",
         })
@@ -49,10 +49,15 @@ class AITVStudio:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """Initialize the studio with the provided configuration.
 
+        The LLM client is loaded automatically from :mod:`src.model_load`
+        (``deepseek-chat`` via ``DEEPSEEK_API_KEY``) following the same
+        pattern as :class:`~src.pipeline.script_generator.ScriptGenerator`.
+        Call :meth:`configure_llm` to override with a custom client.
+
         Args:
             config: Configuration dictionary. Supported keys:
-                - ``llm_provider``: LLM provider name (default: ``"openai"``).
-                - ``llm_model``: Model identifier (default: ``"gpt-4"``).
+                - ``llm_model``: Model identifier (default: ``"deepseek-chat"``).
+                  The LLM provider is always DeepSeek (via :mod:`src.model_load`).
                 - ``video_api``: Video API provider (default: ``"runway"``).
                 - ``output_dir``: Output directory (default: ``"./output"``).
                 - ``data_dir``: Asset data directory (default: ``"./data"``).
@@ -77,13 +82,17 @@ class AITVStudio:
         )
 
     def configure_llm(self, llm_client, model: Optional[str] = None) -> None:
-        """Attach an LLM client for script generation.
+        """Attach a custom LLM client for script generation.
+
+        This overrides the default client loaded from :mod:`src.model_load`.
+        Both the client and model follow the same interface as used in
+        :class:`~src.pipeline.script_generator.ScriptGenerator`.
 
         Args:
-            llm_client: LLM client instance with a ``chat`` method.
-            model: Optional model identifier override.
+            llm_client: LangChain-compatible LLM client (e.g. ``ChatDeepSeek``).
+            model: Optional model identifier override (default: ``"deepseek-chat"``).
         """
-        model = model or self.config.get("llm_model", "gpt-4")
+        model = model or self.config.get("llm_model", "deepseek-chat")
         self.script_generator = ScriptGenerator(llm_client=llm_client, model=model)
 
     def configure_mcp(self, mcp_server) -> None:
@@ -130,15 +139,20 @@ class AITVStudio:
             The produced Episode with all shots generated and assembled.
 
         Raises:
-            RuntimeError: If the LLM or MCP clients have not been configured.
+            RuntimeError: If the MCP server has not been configured.
         """
-        if not self.script_generator:
-            raise RuntimeError(
-                "LLM client not configured. Call configure_llm() first."
-            )
         if not self._mcp_server:
             raise RuntimeError(
                 "MCP server not configured. Call configure_mcp() first."
+            )
+
+        # Auto-initialize the ScriptGenerator from model_load if not already
+        # configured via configure_llm(), following the same pattern as
+        # ScriptGenerator itself (see src/pipeline/script_generator.py).
+        if not self.script_generator:
+            self.script_generator = ScriptGenerator(
+                llm_client=model_load.load(),
+                model=self.config.get("llm_model", "deepseek-chat"),
             )
 
         logger.info(
