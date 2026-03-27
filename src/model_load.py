@@ -6,8 +6,36 @@ environment variable so that credentials are never hard-coded in source.
 """
 
 import os
+from pathlib import Path
 
 from langchain_deepseek import ChatDeepSeek
+
+
+def _get_api_key() -> str:
+    """Resolve the DeepSeek API key.
+
+    Checks in order:
+    1. ``DEEPSEEK_API_KEY`` environment variable.
+    2. ``deepseek.api_key`` in ``config/video_api_keys.yaml`` (workspace root).
+
+    Returns:
+        The API key string, or an empty string if not found.
+    """
+    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if key:
+        return key
+
+    config_path = Path(__file__).parent.parent / "config" / "video_api_keys.yaml"
+    if config_path.exists():
+        try:
+            import yaml
+            with open(config_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            key = (data or {}).get("deepseek", {}).get("api_key", "")
+        except Exception:
+            pass
+
+    return key or ""
 
 
 def load() -> ChatDeepSeek:
@@ -22,7 +50,7 @@ def load() -> ChatDeepSeek:
         max_tokens=None,
         timeout=None,
         max_retries=2,
-        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        api_key=_get_api_key(),
     )
     return llm
 
@@ -39,7 +67,7 @@ def load_reasoning() -> ChatDeepSeek:
         max_tokens=None,
         timeout=None,
         max_retries=2,
-        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        api_key=_get_api_key(),
     )
     return llm
 

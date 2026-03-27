@@ -15,9 +15,9 @@
 """
 
 import json
-import uuid
+from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import logging
 
 # ============================================================================
@@ -28,6 +28,7 @@ from src.studio import AITVStudio
 from src.mcp.ark_video_client import ArkVideoAPIClient
 from src.mcp.video_director_server import VideoDirectorServer
 from src.models.character import Character, CharacterVisualCore, CharacterEmotion
+import src.model_load as model_load
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
@@ -35,48 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 第二部分：LLM客户端示例（这里使用OpenAI）
-# ============================================================================
-
-class LLMChatClient:
-    """简单的LLM客户端包装，用于调用OpenAI或其他LLM服务。
-    
-    ⚠️ [LLM调用] 标记：每次调用 chat() 方法都会消耗LLM token
-    """
-    
-    def __init__(self, model: str = "deepseek-chat"):
-        try:
-            from openai import OpenAI
-        except ImportError:
-            raise ImportError("openai package required. Install: pip install openai")
-        
-        self.client = OpenAI()  # 需要设置 OPENAI_API_KEY 环境变量
-        self.model = model
-    
-    def chat(self, model: str, messages: list) -> str:
-        """调用LLM API生成响应。
-        
-        ⚠️ [LLM调用] 这里每次调用都消耗token
-        
-        Args:
-            model: 模型名称
-            messages: 对话消息列表
-        
-        Returns:
-            LLM生成的响应文本
-        """
-        logger.info(f"📝 [LLM调用 ⚠️] 调用 {model} 生成脚本...")
-        
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.7,
-        )
-        return response.choices[0].message.content
-
-
-# ============================================================================
-# 第三部分：数据结构构建 - 角色定义
+# 第二部分：数据结构构建 - 角色定义
 # ============================================================================
 
 def create_sample_characters() -> tuple[Character, Character]:
@@ -124,7 +84,7 @@ def create_sample_characters() -> tuple[Character, Character]:
 
 
 # ============================================================================
-# 第四部分：Series配置
+# 第三部分：Series配置
 # ============================================================================
 
 def create_series_config() -> Dict[str, Any]:
@@ -155,8 +115,66 @@ def create_series_config() -> Dict[str, Any]:
     return config
 
 
+def persist_episode_snapshot(episode, stage: str, output_dir: str = "./data/generated") -> Dict[str, str]:
+    """将Episode/Scene/Shot数据自动落盘为JSON快照。
+
+    Args:
+        episode: Episode对象
+        stage: 阶段标记，例如 script_generated / shots_planned / dry_run_completed
+        output_dir: 输出目录，默认写入 data/generated
+
+    Returns:
+        包含写入文件路径的字典
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    episode_number = getattr(episode, "episode_number", 0)
+    episode_file = output_path / f"episode_{episode_number:02d}_{stage}.json"
+    shots_file = output_path / f"shots_{episode_number:02d}_{stage}.json"
+
+    # dataclass -> dict，确保Episode/Scene/Shot层级全部可序列化
+    episode_payload = asdict(episode)
+
+    shots_payload = []
+    for scene in episode.scenes:
+        for shot in scene.shots:
+            shots_payload.append(
+                {
+                    "episode_id": episode.id,
+                    "episode_number": episode.episode_number,
+                    "episode_title": episode.episode_title,
+                    "scene_id": scene.id,
+                    "scene_number": scene.scene_number,
+                    "scene_location": scene.location,
+                    "shot_id": shot.id,
+                    "sequence_number": shot.sequence_number,
+                    "generation_mode": shot.generation_mode.value,
+                    "duration": shot.duration,
+                    "characters_in_shot": shot.characters_in_shot,
+                    "text_prompt": shot.text_prompt,
+                    "generated_video_path": shot.generated_video_path,
+                    "generation_error": shot.generation_error,
+                }
+            )
+
+    with episode_file.open("w", encoding="utf-8") as f:
+        json.dump(episode_payload, f, ensure_ascii=False, indent=2)
+
+    with shots_file.open("w", encoding="utf-8") as f:
+        json.dump(shots_payload, f, ensure_ascii=False, indent=2)
+
+    logger.info("💾 [自动落盘] 已保存Episode快照: %s", episode_file)
+    logger.info("💾 [自动落盘] 已保存Shot清单: %s", shots_file)
+
+    return {
+        "episode": str(episode_file),
+        "shots": str(shots_file),
+    }
+
+
 # ============================================================================
-# 第五部分：Studio初始化
+# 第四部分：Studio初始化
 # ============================================================================
 
 def initialize_studio() -> AITVStudio:
@@ -169,38 +187,45 @@ def initialize_studio() -> AITVStudio:
     studio = AITVStudio(config={
         "output_dir": "./outputs",
         "data_dir": "./data",
-        "llm_model": "gpt-4"
+        "llm_model": "deepseek-chat",
     })
     
     return studio
 
 
 # ============================================================================
-# 第六部分：配置LLM和视频API
+# 第五部分：配置LLM和视频API
 # ============================================================================
 
-def configure_studio_with_apis(studio: AITVStudio, llm_client: LLMChatClient):
+def configure_studio_with_apis(studio: AITVStudio):
     """配置Studio使用LLM和视频API。
-    
-    ⚠️ [视频模型调用位置] 这里配置的是MCP服务器，后续调用时会消耗视频API token
+
+    ⚠️ [LLM调用] 使用 model_load.load() 加载 LangChain 兼容的 ChatDeepSeek 实例。
+    读取环境变量 DEEPSEEK_API_KEY 作为凭据。
+
+    ⚠️ [视频模型调用位置] 配置 MCP 服务器后，后续视频生成调用会消耗视频API token。
     """
-    logger.info("⚙️ [配置] 配置LLM客户端...")
-    studio.configure_llm(llm_client, model="gpt-4")
-    
+    logger.info("⚙️ [配置] 加载DeepSeek LLM客户端 (DEEPSEEK_API_KEY)...")
+    llm = model_load.load()
+    studio.configure_llm(llm, model="deepseek-chat")
+    logger.info("✅ LLM配置完成")
+
     logger.info("⚙️ [配置] 配置Ark视频API客户端...")
-    ark_client = ArkVideoAPIClient(
-        config_path="config/video_api_keys.yaml",
-        output_dir="./outputs"
-    )
-    
-    video_director = VideoDirectorServer(api_client=ark_client)
-    studio.configure_mcp(video_director)
-    
-    logger.info("✅ API配置完成")
+    try:
+        ark_client = ArkVideoAPIClient(
+            config_path="config/video_api_keys.yaml",
+            output_dir="./outputs"
+        )
+        video_director = VideoDirectorServer(api_client=ark_client)
+        studio.configure_mcp(video_director)
+        logger.info("✅ 视频API配置完成")
+    except Exception as e:
+        logger.warning(f"⚠️ 视频API配置失败: {e}，视频生成将使用DRY RUN模式")
+        studio._mcp_server = None
 
 
 # ============================================================================
-# 第七部分：脚本生成 - LLM调用
+# 第六部分：脚本生成 - LLM调用
 # ============================================================================
 
 def generate_episode_script(studio: AITVStudio, series_config: Dict[str, Any], episode_number: int = 1):
@@ -268,7 +293,7 @@ def generate_episode_script(studio: AITVStudio, series_config: Dict[str, Any], e
 
 
 # ============================================================================
-# 第八部分：镜头规划
+# 第七部分：镜头规划
 # ============================================================================
 
 def plan_shots(studio: AITVStudio, episode):
@@ -311,7 +336,7 @@ def plan_shots(studio: AITVStudio, episode):
 
 
 # ============================================================================
-# 第九部分：视频生成 - 视频API调用
+# 第八部分：视频生成 - 视频API调用
 # ============================================================================
 
 def generate_videos(studio: AITVStudio, episode, dry_run: bool = False):
@@ -355,7 +380,7 @@ def generate_videos(studio: AITVStudio, episode, dry_run: bool = False):
         logger.warning("⚠️ DRY RUN 模式: 未实际调用API")
         logger.info("   如需实际生成视频，请：")
         logger.info("   1. 配置 config/video_api_keys.yaml 中的 ark.api_key")
-        logger.info("   2. 设置环境变量 OPENAI_API_KEY")
+        logger.info("   2. 设置环境变量 DEEPSEEK_API_KEY")
         logger.info("   3. 运行脚本时则会自动调用真实API")
         
         return episode
@@ -381,7 +406,7 @@ def generate_videos(studio: AITVStudio, episode, dry_run: bool = False):
 
 
 # ============================================================================
-# 第十部分：视频组装
+# 第九部分：视频组装
 # ============================================================================
 
 def assemble_episode_video(studio: AITVStudio, episode):
@@ -405,7 +430,7 @@ def assemble_episode_video(studio: AITVStudio, episode):
 
 
 # ============================================================================
-# 第十一部分：主函数
+# 第十部分：主函数
 # ============================================================================
 
 def main():
@@ -437,32 +462,24 @@ def main():
     logger.info("步骤1：配置API")
     logger.info("=" * 70)
     
-    try:
-        llm_client = LLMChatClient(model="gpt-4")
-        configure_studio_with_apis(studio, llm_client)
-    except (ImportError, Exception) as e:
-        logger.error(f"❌ API配置失败: {type(e).__name__}: {e}")
-        logger.info("\n提示：如需运行完整流程，请：")
-        logger.info("  1. pip install openai")
-        logger.info("  2. 设置环境变量 OPENAI_API_KEY")
-        logger.info("  3. 配置 config/video_api_keys.yaml")
-        logger.info("\n本示例将使用模拟模式继续演示流程\n")
-        
-        # 创建模拟客户端继续演示
-        studio.configure_llm(DummyLLMClient(), model="gpt-4")
-        
-        # 模拟模式下跳过MCP配置，后续会在DRY RUN模式下演示
-        studio._mcp_server = None
+    configure_studio_with_apis(studio)
     
     # 步骤 3：生成脚本（LLM调用）
     episode = generate_episode_script(studio, series_config)
+    persist_episode_snapshot(episode, stage="script_generated")
     
     # 步骤 4：规划镜头
     episode = plan_shots(studio, episode)
+    persist_episode_snapshot(episode, stage="shots_planned")
     
     # 步骤 5：生成视频（在DRY RUN模式）
     logger.info("\n💡 为了演示目的，这里使用DRY RUN模式（不实际调用视频API）\n")
-    episode = generate_videos(studio, episode, dry_run=True)
+    dry_run_mode = False
+    episode = generate_videos(studio, episode, dry_run=dry_run_mode)
+    persist_episode_snapshot(
+        episode,
+        stage="dry_run_completed" if dry_run_mode else "video_generated",
+    )
     
     # 如果在生产环境，取消dry_run=True以实际生成视频：
     # episode = generate_videos(studio, episode, dry_run=False)

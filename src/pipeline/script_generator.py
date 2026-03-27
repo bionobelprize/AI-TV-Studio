@@ -93,10 +93,7 @@ Output must be in JSON format as specified below.
                 reference model from ``model_load``.
             model: Model identifier to use for generation.
         """
-        if llm_client is not None:
-            self.llm = llm_client
-        else:
-            self.llm = model_load.load()
+        self.llm = model_load.load()
         self.model = model
         self.parser = JsonOutputParser(pydantic_object=EpisodeScriptOutput)
         self.prompt = PromptTemplate(
@@ -161,13 +158,7 @@ Output must be in JSON format as specified below.
             f"{self.SYSTEM_PROMPT}\n\n{input_dict['episode_outline']}"
         )
 
-        try:
-            return self.chain.invoke(input_dict)
-        except Exception:
-            fallback_prompt = self.prompt.format(**input_dict)
-            response = self.llm.invoke(fallback_prompt)
-            raw_text = self._extract_text_from_response(response)
-            return self._parse_response(raw_text)
+        return self.chain.invoke(input_dict)
 
     def _extract_text_from_response(self, response: Any) -> str:
         """Normalize different LLM response object types to plain text."""
