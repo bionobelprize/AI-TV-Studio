@@ -47,7 +47,7 @@ htmlcov/
 generated/
 outputs/
 reference_code/
-
+data/
 
 # OS
 .DS_Store

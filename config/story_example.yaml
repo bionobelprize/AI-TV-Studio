@@ -1,0 +1,63 @@
+# 剧情配置示例（通用模板）
+studio:
+  output_dir: "./outputs"
+  data_dir: "./data"
+  llm_model: "deepseek-chat"
+
+series:
+  title: "通用剧情系列"
+  genre: "drama"
+  description: "用于演示的通用系列信息"
+
+episode:
+  number: 1
+  outline: |
+    在一个具有挑战的任务背景下，主角与搭档围绕关键线索展开调查。
+    他们需要在有限时间内判断信息真伪，做出策略选择，并推进事件进展。
+    剧情应突出协作、冲突与阶段性转折，最终形成可用于分镜的场景结构。
+
+characters:
+  - id: "char_protagonist"
+    name: "主角"
+    age: 30
+    gender: "unspecified"
+    occupation: "investigator"
+    aliases: ["A"]
+    personality_traits: ["冷静", "执行力强"]
+    character_arc: "从独立处理问题转向有效协作"
+    visual_core:
+      base_image_path: "./data/characters/protagonist_base.jpg"
+      reference_prompt: "adult lead character, practical outfit, focused expression"
+      key_features: "short hair, clean style, determined eyes"
+      lora_trigger: null
+      front_view: null
+      side_view: null
+      three_quarter_view: null
+    voice_id: null
+    voice_emotion_profile: {}
+
+  - id: "char_partner"
+    name: "搭档"
+    age: 27
+    gender: "unspecified"
+    occupation: "analyst"
+    aliases: ["B"]
+    personality_traits: ["理性", "细致"]
+    character_arc: "从谨慎观望转向主动决策"
+    visual_core:
+      base_image_path: "./data/characters/partner_base.jpg"
+      reference_prompt: "adult supporting character, smart casual wear, analytical mood"
+      key_features: "medium hair, glasses, calm expression"
+      lora_trigger: null
+      front_view: null
+      side_view: null
+      three_quarter_view: null
+    voice_id: null
+    voice_emotion_profile: {}
+
+runtime:
+  dry_run: true
+  persist_dir: "./data/generated"
+
+api:
+  video_api_config_path: "config/video_api_keys.yaml"
