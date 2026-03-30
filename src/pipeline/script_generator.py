@@ -15,6 +15,7 @@ Script generation is performed in two phases to improve JSON stability:
 """
 
 import json
+import logging
 import uuid
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -26,6 +27,9 @@ from src.models.episode import Episode
 from src.models.scene import Scene
 from src.models.shot import CameraMotion, GenerationMode, Shot
 import src.model_load as model_load
+
+
+logger = logging.getLogger(__name__)
 
 
 class ShotOutput(BaseModel):
@@ -181,8 +185,30 @@ Generate a sequence of cinematic shots for this scene that:
 2. Are visually consistent with the overall episode mood and arc
 3. Include strong text_prompt values suitable for text-to-video generation
 4. Include character emotions and camera motions
+5. Contain 6-10 shots to avoid overlong outputs
+
+JSON SAFETY RULES:
+- Return ONE JSON object only (no markdown, no commentary)
+- Every string value must use double quotes
+- Keep each action_description concise (<= 120 Chinese characters)
+- Keep each text_prompt concise (<= 220 English characters)
 
 {format_instructions}"""
+
+    SHOTS_JSON_REPAIR_PROMPT_TEMPLATE = """The following model output is intended to be JSON but may be malformed.
+
+Repair it into valid JSON that strictly follows this schema:
+{format_instructions}
+
+Rules:
+- Return ONE JSON object only
+- Do not wrap in markdown code fences
+- Do not add explanations
+- Preserve the original semantic intent as much as possible
+
+Broken output:
+{broken_output}
+"""
 
     # ------------------------------------------------------------------
     # Legacy single-call prompt (kept for _call_llm backward compatibility)
@@ -263,7 +289,7 @@ Output must be in JSON format as specified below.
                 "format_instructions": self._shots_parser.get_format_instructions()
             },
         )
-        self._shots_chain = self._shots_prompt | self.llm | self._shots_parser
+        self._shots_chain = self._shots_prompt | self.llm
 
         # Legacy single-call chain kept for _call_llm backward compatibility
         self.parser = JsonOutputParser(pydantic_object=EpisodeScriptOutput)
@@ -279,6 +305,7 @@ Output must be in JSON format as specified below.
             partial_variables={"format_instructions": self.parser.get_format_instructions()},
         )
         self.chain = self.prompt | self.llm | self.parser
+        self._scene_shots_max_attempts = 3
 
     def generate_episode(
         self,
@@ -396,7 +423,59 @@ Output must be in JSON format as specified below.
             "ambient_sounds": ", ".join(ambient) if ambient else "none",
             "scene_summary": scene_blueprint.get("scene_summary", ""),
         }
-        return self._shots_chain.invoke(input_dict)
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self._scene_shots_max_attempts + 1):
+            raw_response = self._shots_chain.invoke(input_dict)
+            raw_text = self._extract_text_from_response(raw_response)
+
+            try:
+                return self._parse_scene_shots_output(raw_text)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Scene shots parse failed (attempt %d/%d) for scene %s: %s",
+                    attempt,
+                    self._scene_shots_max_attempts,
+                    scene_blueprint.get("scene_number", "?"),
+                    exc,
+                )
+
+                try:
+                    repaired_text = self._repair_scene_shots_output(raw_text)
+                    return self._parse_scene_shots_output(repaired_text)
+                except Exception as repair_exc:
+                    last_error = repair_exc
+                    logger.warning(
+                        "Scene shots JSON repair failed (attempt %d/%d) for scene %s: %s",
+                        attempt,
+                        self._scene_shots_max_attempts,
+                        scene_blueprint.get("scene_number", "?"),
+                        repair_exc,
+                    )
+
+        raise ValueError(
+            f"Failed to generate valid scene shots JSON after {self._scene_shots_max_attempts} attempts"
+        ) from last_error
+
+    def _parse_scene_shots_output(self, raw_text: str) -> Dict[str, Any]:
+        """Parse and validate Phase-2 scene-shots output."""
+        parsed = self._shots_parser.parse(raw_text)
+        validated = SceneShotsOutput.model_validate(parsed)
+        return validated.model_dump()
+
+    def _repair_scene_shots_output(self, broken_output: str) -> str:
+        """Ask the LLM to repair malformed scene-shots JSON."""
+        repair_prompt = self.SHOTS_JSON_REPAIR_PROMPT_TEMPLATE.format(
+            format_instructions=self._shots_parser.get_format_instructions(),
+            broken_output=broken_output,
+        )
+
+        if hasattr(self.llm, "invoke"):
+            repaired = self.llm.invoke(repair_prompt)
+        else:
+            repaired = self.llm(repair_prompt)
+
+        return self._extract_text_from_response(repaired)
 
     @staticmethod
     def _format_all_scenes_summary(scenes: List[Dict[str, Any]]) -> str:
@@ -417,39 +496,6 @@ Output must be in JSON format as specified below.
                 f"{s.get('scene_summary', '')}"
             )
         return "\n".join(lines)
-
-    def _call_llm(
-        self,
-        series_config: Dict[str, Any],
-        episode_outline: str,
-        episode_number: int,
-    ) -> Dict[str, Any]:
-        """Legacy single-call LLM path (kept for backward compatibility).
-
-        Prefer ``generate_episode`` which uses the two-phase approach.
-
-        Args:
-            series_config: Series metadata and character definitions.
-            episode_outline: High-level story outline.
-            episode_number: Episode number.
-
-        Returns:
-            Parsed JSON dictionary representing the generated episode script.
-        """
-        characters_desc = json.dumps(series_config.get("characters", []), indent=2)
-        input_dict = {
-            "series_title": series_config.get("title", "Untitled"),
-            "genre": series_config.get("genre", "drama"),
-            "characters_desc": characters_desc,
-            "episode_outline": episode_outline,
-            "episode_number": episode_number,
-        }
-        # Prepend system instruction to keep output quality consistent.
-        input_dict["episode_outline"] = (
-            f"{self.SYSTEM_PROMPT}\n\n{input_dict['episode_outline']}"
-        )
-
-        return self.chain.invoke(input_dict)
 
     def _extract_text_from_response(self, response: Any) -> str:
         """Normalize different LLM response object types to plain text."""

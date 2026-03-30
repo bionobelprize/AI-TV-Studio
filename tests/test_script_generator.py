@@ -215,6 +215,32 @@ class TestScriptGenerator:
         assert "Chase begins" in llm.calls[1]
         assert "Chase begins" in llm.calls[2]
 
+    def test_generate_episode_repairs_malformed_scene_shots_json(self):
+        """If phase-2 JSON is malformed, generator should repair and continue."""
+        malformed_shots = (
+            '{"shots": [{"sequence_number": 1, "action_description": 中景：主角醒来, '
+            '"duration": 5, "text_prompt": "hero wakes"}]}'
+        )
+
+        llm = MultiResponseDummyLLM([
+            json.dumps(self._valid_blueprint_payload()),
+            malformed_shots,
+            json.dumps(self._valid_shots_payload()),
+        ])
+        generator = ScriptGenerator(llm_client=llm)
+
+        episode = generator.generate_episode(
+            series_config=self._series_config(),
+            episode_outline="A malformed output should be repaired.",
+            episode_number=1,
+        )
+
+        assert len(episode.scenes) == 1
+        assert len(episode.scenes[0].shots) == 2
+        # 1 blueprint + 1 malformed shots + 1 repair call
+        assert len(llm.calls) == 3
+        assert "Repair it into valid JSON" in llm.calls[2]
+
     def test_parse_response_accepts_markdown_wrapped_json(self):
         payload = self._valid_script_payload()
         raw = """```json\n""" + json.dumps(payload) + """\n```"""
