@@ -6,6 +6,7 @@ import os
 import pytest
 
 from src.models.character import CharacterEmotion
+from src.models.shot import GenerationMode
 from src.pipeline.script_generator import ScriptGenerator
 
 
@@ -94,30 +95,56 @@ class TestScriptGenerator:
             ],
         }
 
-    def _valid_shots_payload(self):
-        """Phase 2 response: shots for a single scene."""
+    def _valid_shot_plan_payload(self):
+        """Phase 2 response: minimal shot plan for a single scene."""
         return {
             "shots": [
                 {
                     "sequence_number": 1,
-                    "action_description": "Lin enters the alley.",
-                    "dialogue": "Stay where you are!",
+                    "brief_description": "Lin enters the alley.",
                     "characters_in_shot": ["char_lin"],
-                    "character_emotions": {
-                        "char_lin": "neutral",
-                        "char_chen": "not_an_emotion",
-                    },
-                    "duration": 7,
-                    "camera_motion": {"type": "push_in", "speed": 1.2},
-                    "lighting_description": "cold streetlight",
-                    "text_prompt": "cinematic noir alley at night",
                 },
                 {
                     "sequence_number": 2,
-                    "action_description": "A shadow disappears.",
-                    "duration": 9,
-                    "text_prompt": "shadow running through fog",
+                    "brief_description": "A shadow disappears.",
+                    "characters_in_shot": [],
                 },
+            ]
+        }
+
+    def _valid_single_shot1_payload(self):
+        """Phase 3 response: full details for shot 1 (has characters)."""
+        return {
+            "sequence_number": 1,
+            "action_description": "Lin enters the alley.",
+            "dialogue": "Stay where you are!",
+            "characters_in_shot": ["char_lin"],
+            "character_emotions": {
+                "char_lin": "neutral",
+                "char_chen": "not_an_emotion",
+            },
+            "duration": 7,
+            "camera_motion": {"type": "push_in", "speed": 1.2},
+            "lighting_description": "cold streetlight",
+            "text_prompt": "cinematic noir alley at night",
+        }
+
+    def _valid_single_shot2_payload(self):
+        """Phase 3 response: full details for shot 2 (no characters)."""
+        return {
+            "sequence_number": 2,
+            "action_description": "A shadow disappears.",
+            "characters_in_shot": [],
+            "duration": 9,
+            "text_prompt": "shadow running through fog",
+        }
+
+    def _valid_shots_payload(self):
+        """Combined shots payload (kept for _parse_response / legacy tests)."""
+        return {
+            "shots": [
+                self._valid_single_shot1_payload(),
+                self._valid_single_shot2_payload(),
             ]
         }
 
@@ -127,12 +154,25 @@ class TestScriptGenerator:
         payload["scenes"][0]["shots"] = self._valid_shots_payload()["shots"]
         return payload
 
-    def test_generate_episode_success(self):
-        """Two-phase generation: blueprint call then per-scene shots call."""
-        llm = MultiResponseDummyLLM([
+    def _make_3phase_llm(self):
+        """Build a MultiResponseDummyLLM for a 1-scene / 2-shot episode.
+
+        Call order:
+          0 – Phase 1 blueprint
+          1 – Phase 2 shot plan (scene 1, 2 planned shots)
+          2 – Phase 3 shot 1 full details
+          3 – Phase 3 shot 2 full details
+        """
+        return MultiResponseDummyLLM([
             json.dumps(self._valid_blueprint_payload()),
-            json.dumps(self._valid_shots_payload()),
+            json.dumps(self._valid_shot_plan_payload()),
+            json.dumps(self._valid_single_shot1_payload()),
+            json.dumps(self._valid_single_shot2_payload()),
         ])
+
+    def test_generate_episode_success(self):
+        """Three-phase generation: blueprint → shot plan → individual shots."""
+        llm = self._make_3phase_llm()
         generator = ScriptGenerator(llm_client=llm)
 
         episode = generator.generate_episode(
@@ -154,15 +194,71 @@ class TestScriptGenerator:
         assert shot.camera_motion.type == "push_in"
         assert shot.character_emotions == {"char_lin": CharacterEmotion.NEUTRAL}
 
-        # Two-phase: 1 blueprint call + 1 shots call (one per scene)
-        assert len(llm.calls) == 2
+        # Three-phase: 1 blueprint + 1 shot plan + 2 individual shots (1 scene × 2 shots)
+        assert len(llm.calls) == 4
         # Phase 1 blueprint prompt must include the strict format marker
         assert "STRICT OUTPUT FORMAT" in llm.calls[0]
-        # Phase 2 shots prompt must embed the full episode blueprint for coherence
+        # Phase 2 shot plan prompt must embed the full episode blueprint
         assert "EPISODE BLUEPRINT" in llm.calls[1]
+        # Phase 3 single-shot prompts must also embed the blueprint
+        assert "EPISODE BLUEPRINT" in llm.calls[2]
+        assert "EPISODE BLUEPRINT" in llm.calls[3]
+
+    def test_generate_episode_generation_mode_with_characters(self):
+        """Shots that include characters must use REFERENCE_TO_VIDEO mode."""
+        llm = self._make_3phase_llm()
+        episode = ScriptGenerator(llm_client=llm).generate_episode(
+            series_config=self._series_config(),
+            episode_outline="Outline",
+            episode_number=1,
+        )
+        shot0 = episode.scenes[0].shots[0]
+        assert shot0.characters_in_shot == ["char_lin"]
+        assert shot0.generation_mode == GenerationMode.REFERENCE_TO_VIDEO
+
+    def test_generate_episode_generation_mode_without_characters(self):
+        """Shots with no characters must use TEXT_TO_VIDEO mode."""
+        llm = self._make_3phase_llm()
+        episode = ScriptGenerator(llm_client=llm).generate_episode(
+            series_config=self._series_config(),
+            episode_outline="Outline",
+            episode_number=1,
+        )
+        shot1 = episode.scenes[0].shots[1]
+        assert shot1.characters_in_shot == []
+        assert shot1.generation_mode == GenerationMode.TEXT_TO_VIDEO
+
+    def test_generate_episode_character_registry_in_prompts(self):
+        """Shot plan and single-shot prompts must contain registered character IDs."""
+        llm = self._make_3phase_llm()
+        ScriptGenerator(llm_client=llm).generate_episode(
+            series_config=self._series_config(),
+            episode_outline="Outline",
+            episode_number=1,
+        )
+        # Phase 2 shot plan prompt and Phase 3 shot prompts must carry exact IDs
+        for call_idx in [1, 2, 3]:
+            assert "char_lin" in llm.calls[call_idx], (
+                f"Call {call_idx} prompt should contain character ID 'char_lin'"
+            )
+            assert "char_chen" in llm.calls[call_idx], (
+                f"Call {call_idx} prompt should contain character ID 'char_chen'"
+            )
+
+    def test_generate_episode_previous_shots_context_in_phase3(self):
+        """Phase 3 prompts for later shots must include prior shots as context."""
+        llm = self._make_3phase_llm()
+        ScriptGenerator(llm_client=llm).generate_episode(
+            series_config=self._series_config(),
+            episode_outline="Outline",
+            episode_number=1,
+        )
+        # Shot 2 prompt (call index 3) should reference Shot 1's action description
+        shot2_prompt = llm.calls[3]
+        assert "Lin enters the alley" in shot2_prompt
 
     def test_generate_episode_multiple_scenes(self):
-        """Each scene in the blueprint triggers its own shots LLM call."""
+        """Each scene triggers its own shot plan call followed by per-shot calls."""
         blueprint = {
             "episode_title": "Two Scenes",
             "logline": "A two-scene episode.",
@@ -191,11 +287,21 @@ class TestScriptGenerator:
                 },
             ],
         }
-        shots = {"shots": [{"sequence_number": 1, "action_description": "Shot.", "duration": 5, "text_prompt": "p"}]}
+        single_shot_plan = {
+            "shots": [{"sequence_number": 1, "brief_description": "Shot.", "characters_in_shot": []}]
+        }
+        single_shot = {
+            "sequence_number": 1,
+            "action_description": "Shot.",
+            "duration": 5,
+            "text_prompt": "p",
+        }
         llm = MultiResponseDummyLLM([
             json.dumps(blueprint),
-            json.dumps(shots),
-            json.dumps(shots),
+            json.dumps(single_shot_plan),   # scene 1 shot plan
+            json.dumps(single_shot),         # scene 1, shot 1
+            json.dumps(single_shot_plan),   # scene 2 shot plan
+            json.dumps(single_shot),         # scene 2, shot 1
         ])
         generator = ScriptGenerator(llm_client=llm)
 
@@ -206,14 +312,50 @@ class TestScriptGenerator:
         )
 
         assert len(episode.scenes) == 2
-        # 1 blueprint call + 2 shots calls (one per scene)
-        assert len(llm.calls) == 3
-        # Both shots prompts embed the full blueprint
-        assert "EPISODE BLUEPRINT" in llm.calls[1]
-        assert "EPISODE BLUEPRINT" in llm.calls[2]
-        # Each shots prompt references all scene summaries for coherence
+        # 1 blueprint + 2 shot plans + 2 individual shots (one shot per scene)
+        assert len(llm.calls) == 5
+        # Shot plan prompts embed the full blueprint for both scenes
+        assert "EPISODE BLUEPRINT" in llm.calls[1]  # scene 1 shot plan
+        assert "EPISODE BLUEPRINT" in llm.calls[3]  # scene 2 shot plan
+        # Each shot plan prompt references all scene summaries
         assert "Chase begins" in llm.calls[1]
-        assert "Chase begins" in llm.calls[2]
+        assert "Chase begins" in llm.calls[3]
+
+    def test_generate_episode_repairs_malformed_shot_plan_json(self):
+        """If Phase 2 shot plan JSON is malformed, generator should repair and continue."""
+        malformed_plan = (
+            '{"shots": [{"sequence_number": 1, "brief_description": 中景：主角醒来, '
+            '"characters_in_shot": []}]}'
+        )
+        valid_plan = json.dumps({
+            "shots": [{"sequence_number": 1, "brief_description": "Hero wakes up.", "characters_in_shot": []}]
+        })
+        single_shot = json.dumps({
+            "sequence_number": 1,
+            "action_description": "Hero wakes.",
+            "duration": 5,
+            "text_prompt": "hero wakes",
+        })
+
+        llm = MultiResponseDummyLLM([
+            json.dumps(self._valid_blueprint_payload()),
+            malformed_plan,   # Phase 2 first attempt (malformed)
+            valid_plan,       # Phase 2 repair result
+            single_shot,      # Phase 3 shot 1
+        ])
+        generator = ScriptGenerator(llm_client=llm)
+
+        episode = generator.generate_episode(
+            series_config=self._series_config(),
+            episode_outline="A malformed output should be repaired.",
+            episode_number=1,
+        )
+
+        assert len(episode.scenes) == 1
+        assert len(episode.scenes[0].shots) == 1
+        # 1 blueprint + 1 malformed plan + 1 repair call + 1 individual shot
+        assert len(llm.calls) == 4
+        assert "Repair it into valid JSON" in llm.calls[2]
 
     def test_format_all_scenes_summary(self):
         """Utility method formats scene list into a readable narrative overview."""
@@ -238,6 +380,83 @@ class TestScriptGenerator:
         assert "afternoon" in summary
         assert "tense" in summary
         assert "Conflict arises" in summary
+
+    def test_format_characters_registry(self):
+        """Character registry string must contain exact IDs and names."""
+        characters = [
+            {"id": "char_lin", "name": "Lin Xiao", "occupation": "Detective"},
+            {"id": "char_chen", "name": "Chen Wei"},
+        ]
+        registry = ScriptGenerator._format_characters_registry(characters)
+
+        assert '"char_lin"' in registry
+        assert "Lin Xiao" in registry
+        assert "Detective" in registry
+        assert '"char_chen"' in registry
+        assert "Chen Wei" in registry
+
+    def test_format_characters_registry_empty(self):
+        """Empty character list returns a sensible fallback string."""
+        registry = ScriptGenerator._format_characters_registry([])
+        assert registry == "(No characters defined)"
+
+    def test_format_previous_shots_summary_empty(self):
+        """No prior shots should return a first-shot marker."""
+        summary = ScriptGenerator._format_previous_shots_summary([])
+        assert "first shot" in summary.lower()
+
+    def test_format_previous_shots_summary_with_shots(self):
+        """Prior shots should be included in continuity context."""
+        shots = [
+            {
+                "sequence_number": 1,
+                "action_description": "Hero enters.",
+                "characters_in_shot": ["char_lin"],
+                "dialogue": "Hello!",
+            }
+        ]
+        summary = ScriptGenerator._format_previous_shots_summary(shots)
+        assert "Shot 1" in summary
+        assert "Hero enters." in summary
+        assert "char_lin" in summary
+        assert "Hello!" in summary
+
+    def test_asset_manager_characters_used_in_registry(self):
+        """When asset_manager is provided, its character IDs appear in prompts."""
+        from src.models.character import Character, CharacterVisualCore
+        from src.pipeline.asset_manager import AssetManager
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            am = AssetManager(base_dir=tmpdir)
+            vc = CharacterVisualCore(
+                base_image_path="/img/base.png",
+                reference_prompt="A detective",
+                key_features="short black hair",
+            )
+            am.register_character(Character(
+                id="reg_char_001",
+                name="Registered Hero",
+                age=30,
+                gender="female",
+                occupation="Spy",
+                visual_core=vc,
+            ))
+
+            llm = self._make_3phase_llm()
+            generator = ScriptGenerator(llm_client=llm, asset_manager=am)
+            generator.generate_episode(
+                series_config=self._series_config(),
+                episode_outline="Outline",
+                episode_number=1,
+            )
+
+            # All shot-related prompts (Phase 2 and Phase 3) must carry the
+            # registered character ID, not only the series_config characters.
+            for call_idx in [1, 2, 3]:
+                assert "reg_char_001" in llm.calls[call_idx], (
+                    f"Call {call_idx} prompt should contain registered character ID"
+                )
 
     def test_parse_response_accepts_markdown_wrapped_json(self):
         payload = self._valid_script_payload()
@@ -266,10 +485,7 @@ class TestScriptGenerator:
         assert '"episode_title": "E1"' in text
 
     def test_compute_runtime_sums_all_shot_durations(self):
-        llm = MultiResponseDummyLLM([
-            json.dumps(self._valid_blueprint_payload()),
-            json.dumps(self._valid_shots_payload()),
-        ])
+        llm = self._make_3phase_llm()
         generator = ScriptGenerator(llm_client=llm)
 
         episode = generator.generate_episode(
@@ -285,7 +501,7 @@ def test_script_generator_real_run_prints_runtime_status():
     """Run ScriptGenerator with the real configured LLM and print key outputs.
 
     Enable with:
-    RUN_REAL_SCRIPT_GENERATOR=1 python -m pytest -s -q tests/test_script_generator.py -k real_run
+    RUN_REAL_SCRIPT_GENERATOR=1 python -m pytest -s -q test_script_generator.py -k real_run
     """
 
     series_config = {
@@ -328,7 +544,9 @@ def test_script_generator_real_run_prints_runtime_status():
         for shot in scene.shots:
             motion = shot.camera_motion.type if shot.camera_motion else "none"
             print(
-                f"  shot#{shot.sequence_number} duration={shot.duration} motion={motion}"
+                f"  shot#{shot.sequence_number} duration={shot.duration} "
+                f"mode={shot.generation_mode.value} motion={motion} "
+                f"chars={shot.characters_in_shot}"
             )
 
     assert episode.episode_title
