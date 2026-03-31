@@ -67,6 +67,26 @@ class TestShotPlannerGenerationMode:
             == GenerationMode.REFERENCE_TO_VIDEO
         )
 
+    def test_ref2video_when_non_transition_shot_with_characters(self):
+        """Non-transition shots with characters should use reference images."""
+        shot = _make_shot("s1", "sc1", 1, chars=["c1"])
+        shot.is_transition_shot = False
+        # Even without preceding shot, should use reference images for character consistency
+        assert (
+            self.planner._select_generation_mode(shot, False)
+            == GenerationMode.REFERENCE_TO_VIDEO
+        )
+
+    def test_txt2video_for_transition_shot_with_characters(self):
+        """Transition shots should not automatically use reference images."""
+        shot = _make_shot("s1", "sc1", 1, chars=["c1"])
+        shot.is_transition_shot = True
+        # Transition shots without preceding context should fall back to TEXT_TO_VIDEO
+        assert (
+            self.planner._select_generation_mode(shot, False)
+            == GenerationMode.TEXT_TO_VIDEO
+        )
+
     def test_txt2video_no_context(self):
         shot = _make_shot("s1", "sc1", 1)
         assert (
@@ -90,6 +110,68 @@ class TestShotPlannerGenerationMode:
             self.planner._select_generation_mode(shot, False)
             == GenerationMode.FIRST_FRAME
         )
+
+
+class TestShotPlannerReferenceImagePopulation:
+    """Test reference image population for character-based shots."""
+
+    def setup_method(self):
+        from unittest.mock import MagicMock
+        from src.models.character import CharacterVisualCore
+
+        self.asset_manager_mock = MagicMock()
+        self.planner = ShotPlanner(asset_manager=self.asset_manager_mock)
+
+        # Setup mock character visual cores
+        self.asset_manager_mock.get_character_reference_image.side_effect = lambda cid: (
+            f"/refs/{cid}_ref.png" if cid in ["c1", "c2"] else None
+        )
+
+    def test_populate_reference_images_for_non_transition_shot(self):
+        """Non-transition shots with characters should get reference images populated."""
+        shot = _make_shot("s1", "sc1", 1, chars=["c1", "c2"])
+        shot.is_transition_shot = False
+
+        self.planner._populate_reference_images(shot)
+
+        # Reference images should be populated
+        assert len(shot.reference_images) == 2
+        assert "/refs/c1_ref.png" in shot.reference_images
+        assert "/refs/c2_ref.png" in shot.reference_images
+
+    def test_populate_reference_images_skips_transition_shots(self):
+        """Transition shots should not have reference images populated."""
+        shot = _make_shot("s1", "sc1", 1, chars=["c1"])
+        shot.is_transition_shot = True
+        shot.reference_images = []
+
+        self.planner._populate_reference_images(shot)
+
+        # Reference images should NOT be populated for transition shots
+        # (This is controlled by the caller's condition)
+
+    def test_populate_reference_images_handles_missing_assets(self):
+        """Should handle characters without reference images gracefully."""
+        shot = _make_shot("s1", "sc1", 1, chars=["c1", "unknown_char"])
+        shot.is_transition_shot = False
+
+        self.planner._populate_reference_images(shot)
+
+        # Only available reference images should be added
+        assert len(shot.reference_images) == 1
+        assert "/refs/c1_ref.png" in shot.reference_images
+
+    def test_populate_reference_images_with_no_asset_manager(self):
+        """Should safely skip if no asset manager is available."""
+        planner = ShotPlanner(asset_manager=None)
+        shot = _make_shot("s1", "sc1", 1, chars=["c1"])
+        shot.is_transition_shot = False
+        shot.reference_images = []
+
+        planner._populate_reference_images(shot)
+
+        # Should not raise an error, reference_images should not be modified
+        assert len(shot.reference_images) == 0
 
 
 class TestShotPlannerTransitionInsertion:

@@ -140,44 +140,16 @@ def persist_episode_snapshot(
 
     episode_number = getattr(episode, "episode_number", 0)
     episode_file = output_path / f"episode_{episode_number:02d}_{stage}.json"
-    shots_file = output_path / f"shots_{episode_number:02d}_{stage}.json"
 
     episode_payload = asdict(episode)
-
-    shots_payload = []
-    for scene in episode.scenes:
-        for shot in scene.shots:
-            shots_payload.append(
-                {
-                    "episode_id": episode.id,
-                    "episode_number": episode.episode_number,
-                    "episode_title": episode.episode_title,
-                    "scene_id": scene.id,
-                    "scene_number": scene.scene_number,
-                    "scene_location": scene.location,
-                    "shot_id": shot.id,
-                    "sequence_number": shot.sequence_number,
-                    "generation_mode": shot.generation_mode.value,
-                    "duration": shot.duration,
-                    "characters_in_shot": shot.characters_in_shot,
-                    "text_prompt": shot.text_prompt,
-                    "generated_video_path": shot.generated_video_path,
-                    "generation_error": shot.generation_error,
-                }
-            )
 
     with episode_file.open("w", encoding="utf-8") as f:
         json.dump(episode_payload, f, ensure_ascii=False, indent=2)
 
-    with shots_file.open("w", encoding="utf-8") as f:
-        json.dump(shots_payload, f, ensure_ascii=False, indent=2)
-
     logger.info("[自动落盘] 已保存 Episode 快照: %s", episode_file)
-    logger.info("[自动落盘] 已保存 Shot 清单: %s", shots_file)
 
     return {
         "episode": str(episode_file),
-        "shots": str(shots_file),
     }
 
 

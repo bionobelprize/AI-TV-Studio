@@ -103,7 +103,8 @@ class AITVStudio:
         """
         self._mcp_server = mcp_server
         self.shot_planner = ShotPlanner(
-            character_registry=self.asset_manager.get_all_characters()
+            character_registry=self.asset_manager.get_all_characters(),
+            asset_manager=self.asset_manager
         )
 
     def register_character(self, character: Character) -> None:
@@ -175,7 +176,8 @@ class AITVStudio:
 
         # Stage 2: Shot planning
         planner = ShotPlanner(
-            character_registry=self.asset_manager.get_all_characters()
+            character_registry=self.asset_manager.get_all_characters(),
+            asset_manager=self.asset_manager
         )
         episode = planner.plan_episode(episode)
         total_shots = sum(len(s.shots) for s in episode.scenes)

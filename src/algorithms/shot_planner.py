@@ -5,7 +5,7 @@ transition shots where character entries or scene changes are needed.
 """
 
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Any
 
 from src.models.character import Character
 from src.models.episode import Episode
@@ -22,20 +22,25 @@ class ShotPlanner:
     3. Create shot boundaries based on duration constraints
     4. Insert transition shots where needed
     5. Optimize generation mode selection
+    6. Populate reference images for character-based shots
     """
 
     DEFAULT_SHOT_DURATION = 8  # seconds
     MIN_SHOT_DURATION = 5
     MAX_SHOT_DURATION = 12
 
-    def __init__(self, character_registry: Optional[dict] = None):
+    def __init__(self, character_registry: Optional[dict] = None, asset_manager: Optional[Any] = None):
         """Initialize the shot planner.
 
         Args:
             character_registry: Optional mapping of character ID to Character
                 objects for character look-up during planning.
+            asset_manager: Optional AssetManager for retrieving character
+                reference images. If provided, reference images will be
+                automatically populated for non-transition shots with characters.
         """
         self.character_registry: dict = character_registry or {}
+        self.asset_manager = asset_manager
 
     def plan_episode(self, episode: Episode) -> Episode:
         """Plan shots for every scene in the episode.
@@ -56,7 +61,8 @@ class ShotPlanner:
         """Plan the shot sequence for a single scene.
 
         Identifies character entries, determines shot boundaries, and inserts
-        transition shots as needed.
+        transition shots as needed. Automatically populates reference images
+        for non-transition shots with characters.
 
         Args:
             scene: The scene to plan.
@@ -92,6 +98,10 @@ class ShotPlanner:
 
             if planned_shots:
                 shot.previous_shot_tail = None  # populated during generation
+
+            # Populate reference images for non-transition shots with characters
+            if not shot.is_transition_shot and shot.characters_in_shot:
+                self._populate_reference_images(shot)
 
             planned_shots.append(shot)
             characters_present.extend(new_characters)
@@ -138,6 +148,9 @@ class ShotPlanner:
 
         Rules:
         - If already set to FIRSTLAST_FRAME, keep it.
+        - If a transition shot, keep its assigned mode.
+        - If NOT a transition shot AND has characters, use REFERENCE_TO_VIDEO
+          for consistency and character coherence.
         - If a preceding shot exists and reference images are provided, use
           REFERENCE_TO_VIDEO for character consistency.
         - Otherwise fall back to TEXT_TO_VIDEO.
@@ -154,6 +167,10 @@ class ShotPlanner:
 
         if shot.start_frame_path and not shot.end_frame_path:
             return GenerationMode.FIRST_FRAME
+
+        # Non-transition shots with characters should use reference images
+        if not shot.is_transition_shot and shot.characters_in_shot:
+            return GenerationMode.REFERENCE_TO_VIDEO
 
         if shot.reference_images or (
             shot.characters_in_shot and has_preceding_shot
@@ -172,3 +189,25 @@ class ShotPlanner:
             Duration clamped to [MIN_SHOT_DURATION, MAX_SHOT_DURATION].
         """
         return max(self.MIN_SHOT_DURATION, min(duration, self.MAX_SHOT_DURATION))
+
+    def _populate_reference_images(self, shot: Shot) -> None:
+        """Populate reference images for a shot based on its characters.
+
+        For each character in the shot, retrieves their reference image from
+        the asset manager and adds it to the shot's reference_images list.
+        If the asset manager is not available, this is a no-op.
+
+        Args:
+            shot: The shot to populate with reference images.
+        """
+        if not self.asset_manager or not shot.characters_in_shot:
+            return
+
+        reference_images = []
+        for char_id in shot.characters_in_shot:
+            ref_image = self.asset_manager.get_character_reference_image(char_id)
+            if ref_image:
+                reference_images.append(ref_image)
+
+        if reference_images:
+            shot.reference_images = reference_images
