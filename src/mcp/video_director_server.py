@@ -112,6 +112,15 @@ class VideoDirectorServer:
             "path": path,
             "duration": duration,
             "mode": "txt2video",
+            "mcp_trace": {
+                "tool_name": "generate_text_to_video",
+                "request": {
+                    "prompt": prompt,
+                    "duration": duration,
+                    "resolution": resolution,
+                    "output_path": output_path,
+                },
+            },
         }
 
     def generate_firstlast_frame_video(
@@ -155,6 +164,16 @@ class VideoDirectorServer:
             "path": path,
             "duration": duration,
             "mode": "firstlast_frame",
+            "mcp_trace": {
+                "tool_name": "generate_firstlast_frame_video",
+                "request": {
+                    "start_frame_path": start_frame_path,
+                    "end_frame_path": end_frame_path,
+                    "prompt": prompt,
+                    "duration": duration,
+                    "output_path": output_path,
+                },
+            },
         }
 
     def generate_first_frame_video(
@@ -192,6 +211,15 @@ class VideoDirectorServer:
             "path": path,
             "duration": duration,
             "mode": "first_frame",
+            "mcp_trace": {
+                "tool_name": "generate_first_frame_video",
+                "request": {
+                    "first_frame_path": first_frame_path,
+                    "prompt": prompt,
+                    "duration": duration,
+                    "output_path": output_path,
+                },
+            },
         }
 
     def generate_reference_video(
@@ -230,6 +258,15 @@ class VideoDirectorServer:
             "path": path,
             "duration": duration,
             "mode": "ref2video",
+            "mcp_trace": {
+                "tool_name": "generate_reference_video",
+                "request": {
+                    "prompt": prompt,
+                    "reference_images": list(reference_images),
+                    "duration": duration,
+                    "output_path": output_path,
+                },
+            },
         }
 
     def generate_image(

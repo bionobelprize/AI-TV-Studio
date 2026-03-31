@@ -74,6 +74,8 @@ class TestVideoDirectorServer:
         )
         assert result["mode"] == "ref2video"
         assert result["duration"] == 10
+        assert result["mcp_trace"]["tool_name"] == "generate_reference_video"
+        assert result["mcp_trace"]["request"]["reference_images"] == ["/img/char.png"]
 
     def test_generate_image(self):
         result = self.server.generate_image(

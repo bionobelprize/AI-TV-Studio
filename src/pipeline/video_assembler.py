@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from src.models.episode import Episode
 from src.models.shot import Shot
@@ -129,6 +129,63 @@ class VideoAssembler:
         except (subprocess.CalledProcessError, ValueError):
             return 0.0
 
+    def _get_video_resolution(self, video_path: str) -> Tuple[int, int]:
+        """Probe a video file to get its frame size.
+
+        Args:
+            video_path: Path to the video file.
+
+        Returns:
+            A ``(width, height)`` tuple.
+
+        Raises:
+            RuntimeError: If ffprobe is unavailable or the resolution cannot be read.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "csv=p=0:s=x",
+                    video_path,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "ffprobe was not found in PATH. Install FFmpeg and ensure both "
+                "ffmpeg and ffprobe are available from the command line."
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            raise RuntimeError(
+                f"Unable to probe video resolution for '{video_path}'. {stderr}"
+            ) from exc
+
+        resolution = result.stdout.strip()
+        try:
+            width_str, height_str = resolution.split("x", maxsplit=1)
+            return int(width_str), int(height_str)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Unable to parse video resolution for '{video_path}': {resolution!r}"
+            ) from exc
+
+    @staticmethod
+    def _normalize_dimension(value: int) -> int:
+        """Round frame dimensions up to the nearest positive even integer."""
+        if value <= 0:
+            raise ValueError("Video dimensions must be positive integers.")
+        return value if value % 2 == 0 else value + 1
+
     def _ffmpeg_assemble(
         self, segments: List[VideoSegment], episode: Episode
     ) -> str:
@@ -158,6 +215,7 @@ class VideoAssembler:
         filter_parts: List[str] = []
         n = len(segments)
         fade_dur = segments[0].transition_duration
+        output_width, output_height = self._determine_output_resolution(segments)
 
         # Pre-compute cumulative offsets to avoid O(n²) summation in the loop
         cumulative_duration = 0.0
@@ -171,7 +229,13 @@ class VideoAssembler:
 
         # Label each input stream
         for i in range(n):
-            filter_parts.append(f"[{i}:v]setpts=PTS-STARTPTS[v{i}]")
+            filter_parts.append(
+                f"[{i}:v]scale={output_width}:{output_height}:"
+                "force_original_aspect_ratio=decrease,"
+                f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2,"
+                "setsar=1,format=yuv420p,setpts=PTS-STARTPTS"
+                f"[v{i}]"
+            )
 
         # Chain cross-fades
         prev_label = "v0"
@@ -207,13 +271,41 @@ class VideoAssembler:
         )
 
         try:
-            subprocess.run(["ffmpeg"] + cmd, check=True, capture_output=True)
+            subprocess.run(
+                ["ffmpeg"] + cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         except FileNotFoundError as exc:
             raise RuntimeError(
                 "ffmpeg was not found in PATH. Install FFmpeg and ensure both "
                 "ffmpeg and ffprobe are available from the command line."
             ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            if stderr:
+                raise RuntimeError(f"ffmpeg assembly failed: {stderr}") from exc
+            raise RuntimeError(
+                f"ffmpeg assembly failed with exit code {exc.returncode}."
+            ) from exc
         return output_path
+
+    def _determine_output_resolution(
+        self, segments: List[VideoSegment]
+    ) -> Tuple[int, int]:
+        """Select a common even output frame size for all segments."""
+        widths: List[int] = []
+        heights: List[int] = []
+        for seg in segments:
+            width, height = self._get_video_resolution(seg.path)
+            widths.append(width)
+            heights.append(height)
+
+        return (
+            self._normalize_dimension(max(widths)),
+            self._normalize_dimension(max(heights)),
+        )
 
     def create_segment_list_file(
         self, segments: List[VideoSegment], list_path: str

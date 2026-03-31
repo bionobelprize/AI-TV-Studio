@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .character import CharacterEmotion
 
@@ -58,6 +58,8 @@ class Shot:
     # Output
     generated_video_path: Optional[str] = None
     generation_error: Optional[str] = None
+    effective_prompt: str = ""
+    generation_trace: Dict[str, Any] = field(default_factory=dict)
 
     # Continuity tracking
     previous_shot_tail: Optional[str] = None  # path to last frame of previous shot

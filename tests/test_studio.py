@@ -280,7 +280,7 @@ class TestAdjacentShotLookup:
 
 class TestFailureHandling:
     def test_ffmpeg_failure_is_logged_gracefully(self):
-        """If frame extraction fails, generation still proceeds without crashing."""
+        """If frame extraction fails, transition generation is skipped clearly."""
         shot_a = _make_shot("a", "sc1", 0)
         trans = _make_shot(
             "t1", "sc1", 1, is_transition=True, mode=GenerationMode.FIRSTLAST_FRAME
@@ -308,8 +308,13 @@ class TestFailureHandling:
             # Should not raise
             studio._generate_shots(episode)
 
-        # All three shots attempted; transition shot still tried even without frames.
-        assert mcp.call_tool.call_count == 3
+        # Only the two non-transition shots call MCP; transition is skipped.
+        assert mcp.call_tool.call_count == 2
+        assert trans.generated_video_path is None
+        assert trans.generation_error == (
+            "Transition frame extraction failed before MCP call: missing start_frame_path, end_frame_path"
+        )
+        assert trans.generation_trace["transition_frame_resolution"]["extraction_errors"]
 
     def test_all_shots_fail_raises_runtime_error(self):
         """RuntimeError raised when every shot fails to generate."""
@@ -376,7 +381,7 @@ class TestGenerateSingleShot:
             "generate_firstlast_frame_video",
             start_frame_path="/start.png",
             end_frame_path="/end.png",
-            prompt=shot.text_prompt,
+            prompt=studio._build_generation_prompt(shot),
             duration=shot.duration,
         )
 
@@ -389,7 +394,7 @@ class TestGenerateSingleShot:
         mcp.call_tool.assert_called_once_with(
             "generate_first_frame_video",
             first_frame_path="/start.png",
-            prompt=shot.text_prompt,
+            prompt=studio._build_generation_prompt(shot),
             duration=shot.duration,
         )
 
@@ -401,10 +406,13 @@ class TestGenerateSingleShot:
         assert result is True
         mcp.call_tool.assert_called_once_with(
             "generate_reference_video",
-            prompt=shot.text_prompt,
+            prompt=studio._build_generation_prompt(shot),
             reference_images=["/ref1.png"],
             duration=shot.duration,
         )
+        assert shot.generation_trace["mcp_request"]["tool_name"] == "generate_reference_video"
+        assert shot.generation_trace["mcp_request"]["reference_images"] == ["/ref1.png"]
+        assert shot.generation_trace["mcp_response"]["path"] == "/v/1.mp4"
 
     def test_dispatches_text_to_video(self):
         studio, mcp = self._studio_with_mcp()
@@ -413,9 +421,64 @@ class TestGenerateSingleShot:
         assert result is True
         mcp.call_tool.assert_called_once_with(
             "generate_text_to_video",
-            prompt=shot.text_prompt,
+            prompt=studio._build_generation_prompt(shot),
             duration=shot.duration,
         )
+
+    def test_build_generation_prompt_includes_structured_shot_fields(self):
+        studio, _ = self._studio_with_mcp()
+        shot = _make_shot("s1", "sc1", 0, mode=GenerationMode.REFERENCE_TO_VIDEO)
+        shot.text_prompt = "A woman works late in a studio."
+        shot.action_description = "她烦躁地抓挠头发，盯着闪烁的光标。"
+        shot.lighting_description = "昏暗房间中只有电脑冷光照亮她的脸。"
+        shot.dialogue = "我真的受够了。"
+        shot.internal_thought = "她快被卡顿和自我怀疑压垮了。"
+        shot.character_emotions = {"char_narrator": "angry"}
+
+        prompt = studio._build_generation_prompt(shot)
+
+        assert "A woman works late in a studio." in prompt
+        assert "Action and staging: 她烦躁地抓挠头发，盯着闪烁的光标。" in prompt
+        assert "Lighting: 昏暗房间中只有电脑冷光照亮她的脸。" in prompt
+        assert "Spoken dialogue: 我真的受够了。" in prompt
+        assert "Internal thought or subtext: 她快被卡顿和自我怀疑压垮了。" in prompt
+        assert "Character emotions: char_narrator=angry" in prompt
+
+    def test_generation_trace_captures_source_fields_and_effective_prompt(self):
+        studio, _ = self._studio_with_mcp()
+        shot = _make_shot("s1", "sc1", 0, mode=GenerationMode.TEXT_TO_VIDEO)
+        shot.action_description = "她盯着屏幕，几乎失去耐心。"
+        shot.lighting_description = "只有屏幕冷光。"
+
+        result = studio._generate_single_shot(shot)
+
+        assert result is True
+        assert shot.effective_prompt == studio._build_generation_prompt(shot)
+        assert shot.generation_trace["source_fields"]["action_description"] == "她盯着屏幕，几乎失去耐心。"
+        assert shot.generation_trace["source_fields"]["lighting_description"] == "只有屏幕冷光。"
+
+
+class TestResumeEpisodeGeneration:
+    def test_resume_skips_existing_successful_shots(self, tmp_path):
+        existing = tmp_path / "existing.mp4"
+        existing.write_bytes(b"video")
+
+        shot_ok = _make_shot("s1", "sc1", 0, mode=GenerationMode.TEXT_TO_VIDEO)
+        shot_ok.generated_video_path = str(existing)
+        shot_missing = _make_shot("s2", "sc1", 1, mode=GenerationMode.TEXT_TO_VIDEO)
+
+        episode = _make_episode([shot_ok, shot_missing])
+
+        studio = AITVStudio()
+        mcp = MagicMock()
+        mcp.call_tool.return_value = {"path": "/v/new.mp4"}
+        studio._mcp_server = mcp
+
+        studio.resume_episode_generation(episode)
+
+        assert mcp.call_tool.call_count == 1
+        assert shot_ok.generated_video_path == str(existing)
+        assert shot_missing.generated_video_path == "/v/new.mp4"
 
     def test_returns_false_on_mcp_exception(self):
         studio, mcp = self._studio_with_mcp(side_effect=Exception("boom"))

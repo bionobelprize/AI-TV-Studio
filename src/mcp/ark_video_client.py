@@ -123,6 +123,23 @@ class ArkVideoAPIClient:
             "remote_url": media_url,
             "status": "succeeded",
             "mode": mode,
+            "provider": "ark",
+            "provider_request": {
+                "base_url": self.base_url,
+                "model": model,
+                "mode": mode,
+                "prompt": prompt,
+                "duration": duration,
+                "resolution": resolution,
+                "ratio": ratio or self._resolution_to_ratio(resolution),
+                "watermark": watermark,
+                "generate_audio": generate_audio,
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "first_frame": first_frame,
+                "reference_images": list(reference_images or []),
+                "content_summary": self._summarize_content(content),
+            },
         }
 
     def generate_image(
@@ -245,6 +262,33 @@ class ArkVideoAPIClient:
                 )
 
         return content
+
+    def _summarize_content(self, content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Summarize Ark content blocks without storing large data URLs."""
+        summary: List[Dict[str, Any]] = []
+        for item in content:
+            entry = {
+                "type": item.get("type"),
+            }
+            if "role" in item:
+                entry["role"] = item.get("role")
+            if item.get("type") == "text":
+                entry["text"] = item.get("text", "")
+            elif item.get("type") == "image_url":
+                image_url = (item.get("image_url") or {}).get("url", "")
+                entry["image_url_kind"] = self._classify_image_url(image_url)
+            summary.append(entry)
+        return summary
+
+    def _classify_image_url(self, image_url: str) -> str:
+        """Describe whether an image was sent as a local data URL or remote URL."""
+        if not image_url:
+            return "missing"
+        if image_url.startswith("data:"):
+            return "data_url"
+        if image_url.startswith(("http://", "https://")):
+            return "remote_url"
+        return "other"
 
     def _wait_for_task(self, task_id: str) -> Any:
         start_time = time.time()

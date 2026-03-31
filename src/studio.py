@@ -248,63 +248,9 @@ class AITVStudio:
             if not shot.is_transition_shot:
                 continue
 
-            # Nearest preceding non-transition shot that was generated.
-            prev_shot = next(
-                (
-                    all_shots[j]
-                    for j in range(i - 1, -1, -1)
-                    if not all_shots[j].is_transition_shot
-                    and all_shots[j].generated_video_path
-                ),
-                None,
-            )
-
-            # Nearest following non-transition shot that was generated.
-            next_shot = next(
-                (
-                    all_shots[j]
-                    for j in range(i + 1, len(all_shots))
-                    if not all_shots[j].is_transition_shot
-                    and all_shots[j].generated_video_path
-                ),
-                None,
-            )
-
-            # Extract the last frame of the previous shot → transition start.
-            if prev_shot:
-                tail_path = (
-                    prev_shot.generated_video_path.rsplit(".", 1)[0]
-                    + "_tail.png"
-                )
-                try:
-                    ffmpeg.extract_frame(
-                        prev_shot.generated_video_path, tail_path
-                    )
-                    shot.start_frame_path = tail_path
-                except Exception as exc:
-                    logger.warning(
-                        "Cannot extract tail frame from shot %s: %s",
-                        prev_shot.id,
-                        exc,
-                    )
-
-            # Extract the first frame of the next shot → transition end.
-            if next_shot:
-                head_path = (
-                    next_shot.generated_video_path.rsplit(".", 1)[0]
-                    + "_head.png"
-                )
-                try:
-                    ffmpeg.extract_frame(
-                        next_shot.generated_video_path, head_path, timestamp=0.0
-                    )
-                    shot.end_frame_path = head_path
-                except Exception as exc:
-                    logger.warning(
-                        "Cannot extract head frame from shot %s: %s",
-                        next_shot.id,
-                        exc,
-                    )
+            if not self._resolve_transition_frames(all_shots, i, ffmpeg):
+                failed_shots.append((shot.id, shot.generation_error))
+                continue
 
             if self._generate_single_shot(shot):
                 successful_count += 1
@@ -323,6 +269,161 @@ class AITVStudio:
         episode.runtime_estimate = self._compute_runtime(episode)
         return episode
 
+    def resume_episode_generation(self, episode: Episode) -> Episode:
+        """Resume generation from a persisted episode snapshot.
+
+        Successful shots whose output files still exist are reused. Only shots
+        with missing or failed outputs are regenerated, allowing iterative runs
+        from a saved ``episode_*_video_generated.json`` snapshot.
+        """
+        failed_shots = []
+        all_shots = []
+        for scene in episode.scenes:
+            all_shots.extend(scene.shots)
+
+        for shot in all_shots:
+            if shot.is_transition_shot:
+                continue
+            if self._shot_has_usable_video(shot):
+                shot.generation_error = None
+                continue
+            if self._generate_single_shot(shot):
+                continue
+            failed_shots.append((shot.id, shot.generation_error or "unknown error"))
+
+        ffmpeg = FFmpegHelper()
+        for i, shot in enumerate(all_shots):
+            if not shot.is_transition_shot:
+                continue
+            if self._shot_has_usable_video(shot):
+                shot.generation_error = None
+                continue
+            if not self._resolve_transition_frames(all_shots, i, ffmpeg):
+                failed_shots.append((shot.id, shot.generation_error or "unknown error"))
+                continue
+            if self._generate_single_shot(shot):
+                continue
+            failed_shots.append((shot.id, shot.generation_error or "unknown error"))
+
+        if failed_shots:
+            logger.warning(
+                "Resume completed with %d failed shots", len(failed_shots)
+            )
+
+        episode.runtime_estimate = self._compute_runtime(episode)
+        return episode
+
+    def _shot_has_usable_video(self, shot) -> bool:
+        """Return True when a shot already has a video file on disk."""
+        if not shot.generated_video_path:
+            return False
+        return Path(shot.generated_video_path).exists()
+
+    def _resolve_transition_frames(self, all_shots, index: int, ffmpeg: FFmpegHelper) -> bool:
+        """Resolve start/end frames for a transition shot from neighbouring videos."""
+        shot = all_shots[index]
+        transition_trace = shot.generation_trace.setdefault(
+            "transition_frame_resolution", {}
+        )
+        extraction_errors = []
+
+        prev_shot = next(
+            (
+                all_shots[j]
+                for j in range(index - 1, -1, -1)
+                if not all_shots[j].is_transition_shot
+                and self._shot_has_usable_video(all_shots[j])
+            ),
+            None,
+        )
+        transition_trace["prev_shot_id"] = prev_shot.id if prev_shot else None
+        transition_trace["prev_generated_video_path"] = (
+            prev_shot.generated_video_path if prev_shot else None
+        )
+
+        next_shot = next(
+            (
+                all_shots[j]
+                for j in range(index + 1, len(all_shots))
+                if not all_shots[j].is_transition_shot
+                and self._shot_has_usable_video(all_shots[j])
+            ),
+            None,
+        )
+        transition_trace["next_shot_id"] = next_shot.id if next_shot else None
+        transition_trace["next_generated_video_path"] = (
+            next_shot.generated_video_path if next_shot else None
+        )
+
+        if prev_shot:
+            tail_path = prev_shot.generated_video_path.rsplit(".", 1)[0] + "_tail.png"
+            try:
+                ffmpeg.extract_frame(prev_shot.generated_video_path, tail_path)
+                shot.start_frame_path = tail_path
+                transition_trace["resolved_start_frame_path"] = tail_path
+            except Exception as exc:
+                extraction_errors.append(
+                    {
+                        "stage": "extract_tail_frame",
+                        "shot_id": prev_shot.id,
+                        "video_path": prev_shot.generated_video_path,
+                        "error": str(exc),
+                    }
+                )
+                logger.warning(
+                    "Cannot extract tail frame from shot %s: %s",
+                    prev_shot.id,
+                    exc,
+                )
+
+        if next_shot:
+            head_path = next_shot.generated_video_path.rsplit(".", 1)[0] + "_head.png"
+            try:
+                ffmpeg.extract_frame(
+                    next_shot.generated_video_path, head_path, timestamp=0.0
+                )
+                shot.end_frame_path = head_path
+                transition_trace["resolved_end_frame_path"] = head_path
+            except Exception as exc:
+                extraction_errors.append(
+                    {
+                        "stage": "extract_head_frame",
+                        "shot_id": next_shot.id,
+                        "video_path": next_shot.generated_video_path,
+                        "error": str(exc),
+                    }
+                )
+                logger.warning(
+                    "Cannot extract head frame from shot %s: %s",
+                    next_shot.id,
+                    exc,
+                )
+
+        if extraction_errors:
+            transition_trace["extraction_errors"] = extraction_errors
+
+        transition_trace["final_start_frame_path"] = shot.start_frame_path
+        transition_trace["final_end_frame_path"] = shot.end_frame_path
+
+        if shot.start_frame_path and shot.end_frame_path:
+            return True
+
+        missing = []
+        if not shot.start_frame_path:
+            missing.append("start_frame_path")
+        if not shot.end_frame_path:
+            missing.append("end_frame_path")
+
+        shot.generation_error = (
+            "Transition frame extraction failed before MCP call: missing "
+            + ", ".join(missing)
+        )
+        shot.generation_trace["mcp_response"] = {
+            "status": "skipped",
+            "error": shot.generation_error,
+        }
+        return False
+
     def _generate_single_shot(self, shot) -> bool:
         """Generate video for a single shot via the MCP server.
 
@@ -338,6 +439,9 @@ class AITVStudio:
         """
         from src.models.shot import GenerationMode
 
+        prompt = self._build_generation_prompt(shot)
+        shot.effective_prompt = prompt
+
         logger.info(
             "Generating shot %s (mode=%s, duration=%ds)",
             shot.id,
@@ -346,40 +450,166 @@ class AITVStudio:
         )
         try:
             if shot.generation_mode == GenerationMode.FIRSTLAST_FRAME:
-                result = self._mcp_server.call_tool(
-                    "generate_firstlast_frame_video",
-                    start_frame_path=shot.start_frame_path,
-                    end_frame_path=shot.end_frame_path,
-                    prompt=shot.text_prompt,
-                    duration=shot.duration,
-                )
+                tool_name = "generate_firstlast_frame_video"
+                tool_kwargs = {
+                    "start_frame_path": shot.start_frame_path,
+                    "end_frame_path": shot.end_frame_path,
+                    "prompt": prompt,
+                    "duration": shot.duration,
+                }
             elif shot.generation_mode == GenerationMode.FIRST_FRAME:
-                result = self._mcp_server.call_tool(
-                    "generate_first_frame_video",
-                    first_frame_path=shot.start_frame_path,
-                    prompt=shot.text_prompt,
-                    duration=shot.duration,
-                )
+                tool_name = "generate_first_frame_video"
+                tool_kwargs = {
+                    "first_frame_path": shot.start_frame_path,
+                    "prompt": prompt,
+                    "duration": shot.duration,
+                }
             elif shot.generation_mode == GenerationMode.REFERENCE_TO_VIDEO:
-                result = self._mcp_server.call_tool(
-                    "generate_reference_video",
-                    prompt=shot.text_prompt,
-                    reference_images=shot.reference_images,
-                    duration=shot.duration,
-                )
+                tool_name = "generate_reference_video"
+                tool_kwargs = {
+                    "prompt": prompt,
+                    "reference_images": shot.reference_images,
+                    "duration": shot.duration,
+                }
             else:
-                result = self._mcp_server.call_tool(
-                    "generate_text_to_video",
-                    prompt=shot.text_prompt,
-                    duration=shot.duration,
-                )
+                tool_name = "generate_text_to_video"
+                tool_kwargs = {
+                    "prompt": prompt,
+                    "duration": shot.duration,
+                }
+
+            shot.generation_trace = {
+                "source_fields": self._collect_generation_source_fields(shot),
+                "effective_prompt": prompt,
+                "mcp_request": {
+                    "tool_name": tool_name,
+                    **tool_kwargs,
+                },
+            }
+
+            result = self._mcp_server.call_tool(tool_name, **tool_kwargs)
             shot.generated_video_path = result.get("path")
             shot.generation_error = None
+            shot.generation_trace["mcp_response"] = self._sanitize_generation_result(result)
             return bool(shot.generated_video_path)
         except Exception as exc:
             shot.generation_error = str(exc)
+            shot.generation_trace.setdefault(
+                "mcp_response",
+                {
+                    "status": "failed",
+                    "error": str(exc),
+                },
+            )
             logger.warning("Failed to generate shot %s: %s", shot.id, exc)
             return False
+
+    def _collect_generation_source_fields(self, shot) -> Dict[str, Any]:
+        """Capture the structured shot data that feeds prompt construction."""
+        return {
+            "generation_mode": getattr(shot.generation_mode, "value", shot.generation_mode),
+            "text_prompt": shot.text_prompt,
+            "action_description": shot.action_description,
+            "dialogue": shot.dialogue,
+            "internal_thought": shot.internal_thought,
+            "characters_in_shot": list(shot.characters_in_shot or []),
+            "character_emotions": self._normalize_character_emotions(shot),
+            "camera_motion": self._serialize_camera_motion(shot),
+            "lighting_description": shot.lighting_description,
+            "duration": shot.duration,
+            "start_frame_path": shot.start_frame_path,
+            "end_frame_path": shot.end_frame_path,
+            "reference_images": list(shot.reference_images or []),
+            "is_transition_shot": shot.is_transition_shot,
+            "transition_type": shot.transition_type,
+        }
+
+    def _normalize_character_emotions(self, shot) -> Dict[str, Any]:
+        """Convert shot character emotions into JSON-safe values."""
+        emotions = getattr(shot, "character_emotions", None) or {}
+        return {
+            char_id: getattr(emotion, "value", emotion)
+            for char_id, emotion in emotions.items()
+        }
+
+    def _serialize_camera_motion(self, shot) -> Dict[str, Any]:
+        """Convert camera motion into a JSON-safe structure."""
+        camera_motion = getattr(shot, "camera_motion", None)
+        if not camera_motion:
+            return {}
+
+        return {
+            "type": camera_motion.type,
+            "speed": camera_motion.speed,
+            "start_position": camera_motion.start_position,
+            "end_position": camera_motion.end_position,
+        }
+
+    def _sanitize_generation_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep generation metadata JSON-safe and focused on debugging value."""
+        sanitized = dict(result or {})
+        return sanitized
+
+    def _build_generation_prompt(self, shot) -> str:
+        """Compose the prompt actually sent to the video model.
+
+        The script stores structured shot metadata across several fields, but the
+        downstream video API accepts a single prompt string. This method merges
+        the important fields into one prompt so the model receives the action,
+        motion, lighting, and emotional context instead of only ``text_prompt``.
+        """
+        parts = []
+
+        if shot.text_prompt and shot.text_prompt.strip():
+            parts.append(shot.text_prompt.strip())
+
+        if shot.action_description and shot.action_description.strip():
+            parts.append(f"Action and staging: {shot.action_description.strip()}")
+
+        camera_motion = self._describe_camera_motion(shot)
+        if camera_motion:
+            parts.append(f"Camera motion: {camera_motion}")
+
+        if shot.lighting_description and shot.lighting_description.strip():
+            parts.append(f"Lighting: {shot.lighting_description.strip()}")
+
+        if shot.dialogue and shot.dialogue.strip():
+            parts.append(f"Spoken dialogue: {shot.dialogue.strip()}")
+
+        if shot.internal_thought and shot.internal_thought.strip():
+            parts.append(f"Internal thought or subtext: {shot.internal_thought.strip()}")
+
+        emotion_summary = self._describe_character_emotions(shot)
+        if emotion_summary:
+            parts.append(f"Character emotions: {emotion_summary}")
+
+        return "\n".join(parts).strip()
+
+    def _describe_camera_motion(self, shot) -> str:
+        """Convert a shot camera_motion object into prompt text."""
+        camera_motion = getattr(shot, "camera_motion", None)
+        if not camera_motion or not getattr(camera_motion, "type", None):
+            return ""
+
+        details = [str(camera_motion.type)]
+        if getattr(camera_motion, "speed", None) not in (None, "", 1.0):
+            details.append(f"speed={camera_motion.speed}")
+        if getattr(camera_motion, "start_position", None):
+            details.append(f"start={camera_motion.start_position}")
+        if getattr(camera_motion, "end_position", None):
+            details.append(f"end={camera_motion.end_position}")
+        return ", ".join(details)
+
+    def _describe_character_emotions(self, shot) -> str:
+        """Convert structured character emotions into prompt text."""
+        emotions = getattr(shot, "character_emotions", None) or {}
+        if not emotions:
+            return ""
+
+        return ", ".join(
+            f"{char_id}={getattr(emotion, 'value', emotion)}"
+            for char_id, emotion in emotions.items()
+        )
 
     def _compute_runtime(self, episode: Episode) -> int:
         """Sum all shot durations to estimate total episode runtime.

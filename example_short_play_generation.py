@@ -246,7 +246,10 @@ def plan_shots(studio: AITVStudio, episode):
 
     from src.algorithms.shot_planner import ShotPlanner
 
-    planner = ShotPlanner(character_registry=studio.asset_manager.get_all_characters())
+    planner = ShotPlanner(
+        character_registry=studio.asset_manager.get_all_characters(),
+        asset_manager=studio.asset_manager,
+    )
     episode = planner.plan_episode(episode)
 
     total_shots = sum(len(scene.shots) for scene in episode.scenes)
