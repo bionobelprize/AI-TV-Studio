@@ -18,6 +18,7 @@ from src.models.episode import Episode
 from src.pipeline.asset_manager import AssetManager
 from src.pipeline.script_generator import ScriptGenerator
 from src.pipeline.video_assembler import VideoAssembler
+from src.utils.ffmpeg_helper import FFmpegHelper
 import src.model_load as model_load
 
 logger = logging.getLogger(__name__)
@@ -195,64 +196,122 @@ class AITVStudio:
     def _generate_shots(self, episode: Episode) -> Episode:
         """Generate video for all shots in the episode via the MCP server.
 
+        Uses a two-phase approach to ensure correct continuity for transition
+        shots:
+
+        **Phase 1** — Generate all non-transition shots first (modes
+        REFERENCE_TO_VIDEO, FIRST_FRAME, TEXT_TO_VIDEO).
+
+        **Phase 2** — For each transition shot (FIRSTLAST_FRAME), derive the
+        start/end frames from the already-generated adjacent videos:
+
+        - ``start_frame_path`` ← tail frame (last frame) of the nearest
+          preceding non-transition shot.
+        - ``end_frame_path`` ← head frame (first frame) of the nearest
+          following non-transition shot.
+
+        Then generate each transition video.
+
         Args:
             episode: Episode with planned shots.
 
         Returns:
             Episode with ``generated_video_path`` populated on each shot.
         """
-        from src.models.shot import GenerationMode
-
         failed_shots = []
         successful_count = 0
 
+        # Flat, ordered list of all shots across all scenes.
+        all_shots = []
         for scene in episode.scenes:
-            for shot in scene.shots:
-                logger.info(
-                    "Generating shot %s (mode=%s, duration=%ds)",
-                    shot.id,
-                    shot.generation_mode,
-                    shot.duration,
+            all_shots.extend(scene.shots)
+
+        # ------------------------------------------------------------------
+        # Phase 1: Generate all non-transition shots first.
+        # ------------------------------------------------------------------
+        for shot in all_shots:
+            if shot.is_transition_shot:
+                continue
+            if self._generate_single_shot(shot):
+                successful_count += 1
+            else:
+                failed_shots.append(
+                    (shot.id, shot.generation_error or "unknown error")
+                )
+
+        # ------------------------------------------------------------------
+        # Phase 2: Populate each transition shot's frames from the adjacent
+        # generated videos, then generate the transition shot.
+        # ------------------------------------------------------------------
+        ffmpeg = FFmpegHelper()
+        for i, shot in enumerate(all_shots):
+            if not shot.is_transition_shot:
+                continue
+
+            # Nearest preceding non-transition shot that was generated.
+            prev_shot = next(
+                (
+                    all_shots[j]
+                    for j in range(i - 1, -1, -1)
+                    if not all_shots[j].is_transition_shot
+                    and all_shots[j].generated_video_path
+                ),
+                None,
+            )
+
+            # Nearest following non-transition shot that was generated.
+            next_shot = next(
+                (
+                    all_shots[j]
+                    for j in range(i + 1, len(all_shots))
+                    if not all_shots[j].is_transition_shot
+                    and all_shots[j].generated_video_path
+                ),
+                None,
+            )
+
+            # Extract the last frame of the previous shot → transition start.
+            if prev_shot:
+                tail_path = (
+                    prev_shot.generated_video_path.rsplit(".", 1)[0]
+                    + "_tail.png"
                 )
                 try:
-                    if shot.generation_mode == GenerationMode.FIRSTLAST_FRAME:
-                        result = self._mcp_server.call_tool(
-                            "generate_firstlast_frame_video",
-                            start_frame_path=shot.start_frame_path,
-                            end_frame_path=shot.end_frame_path,
-                            prompt=shot.text_prompt,
-                            duration=shot.duration,
-                        )
-                    elif shot.generation_mode == GenerationMode.FIRST_FRAME:
-                        result = self._mcp_server.call_tool(
-                            "generate_first_frame_video",
-                            first_frame_path=shot.start_frame_path,
-                            prompt=shot.text_prompt,
-                            duration=shot.duration,
-                        )
-                    elif shot.generation_mode == GenerationMode.REFERENCE_TO_VIDEO:
-                        result = self._mcp_server.call_tool(
-                            "generate_reference_video",
-                            prompt=shot.text_prompt,
-                            reference_images=shot.reference_images,
-                            duration=shot.duration,
-                        )
-                    else:
-                        result = self._mcp_server.call_tool(
-                            "generate_text_to_video",
-                            prompt=shot.text_prompt,
-                            duration=shot.duration,
-                        )
-                    shot.generated_video_path = result.get("path")
-                    shot.generation_error = None
-                    if shot.generated_video_path:
-                        successful_count += 1
-                except Exception as exc:
-                    shot.generation_error = str(exc)
-                    failed_shots.append((shot.id, str(exc)))
-                    logger.warning(
-                        "Failed to generate shot %s: %s", shot.id, exc
+                    ffmpeg.extract_frame(
+                        prev_shot.generated_video_path, tail_path
                     )
+                    shot.start_frame_path = tail_path
+                except Exception as exc:
+                    logger.warning(
+                        "Cannot extract tail frame from shot %s: %s",
+                        prev_shot.id,
+                        exc,
+                    )
+
+            # Extract the first frame of the next shot → transition end.
+            if next_shot:
+                head_path = (
+                    next_shot.generated_video_path.rsplit(".", 1)[0]
+                    + "_head.png"
+                )
+                try:
+                    ffmpeg.extract_frame(
+                        next_shot.generated_video_path, head_path, timestamp=0.0
+                    )
+                    shot.end_frame_path = head_path
+                except Exception as exc:
+                    logger.warning(
+                        "Cannot extract head frame from shot %s: %s",
+                        next_shot.id,
+                        exc,
+                    )
+
+            if self._generate_single_shot(shot):
+                successful_count += 1
+            else:
+                failed_shots.append(
+                    (shot.id, shot.generation_error or "unknown error")
+                )
 
         if successful_count == 0 and failed_shots:
             first_shot_id, first_error = failed_shots[0]
@@ -263,6 +322,64 @@ class AITVStudio:
 
         episode.runtime_estimate = self._compute_runtime(episode)
         return episode
+
+    def _generate_single_shot(self, shot) -> bool:
+        """Generate video for a single shot via the MCP server.
+
+        Dispatches to the appropriate MCP tool based on ``shot.generation_mode``
+        and stores the result on the shot in-place.
+
+        Args:
+            shot: The :class:`~src.models.shot.Shot` to generate.
+
+        Returns:
+            ``True`` if generation succeeded and a video path was obtained,
+            ``False`` otherwise.
+        """
+        from src.models.shot import GenerationMode
+
+        logger.info(
+            "Generating shot %s (mode=%s, duration=%ds)",
+            shot.id,
+            shot.generation_mode,
+            shot.duration,
+        )
+        try:
+            if shot.generation_mode == GenerationMode.FIRSTLAST_FRAME:
+                result = self._mcp_server.call_tool(
+                    "generate_firstlast_frame_video",
+                    start_frame_path=shot.start_frame_path,
+                    end_frame_path=shot.end_frame_path,
+                    prompt=shot.text_prompt,
+                    duration=shot.duration,
+                )
+            elif shot.generation_mode == GenerationMode.FIRST_FRAME:
+                result = self._mcp_server.call_tool(
+                    "generate_first_frame_video",
+                    first_frame_path=shot.start_frame_path,
+                    prompt=shot.text_prompt,
+                    duration=shot.duration,
+                )
+            elif shot.generation_mode == GenerationMode.REFERENCE_TO_VIDEO:
+                result = self._mcp_server.call_tool(
+                    "generate_reference_video",
+                    prompt=shot.text_prompt,
+                    reference_images=shot.reference_images,
+                    duration=shot.duration,
+                )
+            else:
+                result = self._mcp_server.call_tool(
+                    "generate_text_to_video",
+                    prompt=shot.text_prompt,
+                    duration=shot.duration,
+                )
+            shot.generated_video_path = result.get("path")
+            shot.generation_error = None
+            return bool(shot.generated_video_path)
+        except Exception as exc:
+            shot.generation_error = str(exc)
+            logger.warning("Failed to generate shot %s: %s", shot.id, exc)
+            return False
 
     def _compute_runtime(self, episode: Episode) -> int:
         """Sum all shot durations to estimate total episode runtime.
